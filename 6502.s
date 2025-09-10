@@ -1,14 +1,17 @@
 .equ RAM_SIZE, 65536
 
-.equ FLAG_CARRY 0
-.equ FLAG_ZERO 1
-.equ FLAG_INTERRUPT_DISABLE 2
-.equ FLAG_DECIMAL_MODE 3
-.equ FLAG_OVERFLOW 4
-.equ FLAG_NEGATIVE 5
+.equ FLAG_CARRY, 0
+.equ FLAG_ZERO, 1
+.equ FLAG_INTERRUPT_DISABLE, 2
+.equ FLAG_DECIMAL_MODE, 3
+.equ FLAG_OVERFLOW, 4
+.equ FLAG_NEGATIVE, 5
+
+.equ ZERO_PAGE_START, 0
+.equ ZERO_PAGE_END 2561
 
 .bss
-.align 64
+:ta.align 64
 ram:
     .skip RAM_SIZE
 
@@ -38,3 +41,5 @@ flag:
 .macro TESTBIT bitnum, addr
     testb $(1 << \bitnum), \addr
 .endm
+
+
