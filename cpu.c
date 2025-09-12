@@ -25,8 +25,26 @@
 #define FLAG_UNSET 0
 #define FLAG_ERROR -1
 
+#define ADDRMODE_ACC 0
+#define ADDRMODE_ABS 1
+#define ADDRMODE_ABSX 2
+#define ADDRMODE_ABSY 3
+#define ADDRMODE_IMM 4
+#define ADDRMODE_IMPL 5
+#define ADDRMODE_IND 6
+#define ADDRMODE_XIND 8
+#define ADDRMODE_INDY 9
+#define ADDRMODE_REL 10
+#define ADDRMODE_ZPG 11
+#define ADDRMODE_ZPGX 12
+#define ADDRMODE_ZPGY 13
+
+#define CURRENT_PAGE (addr) ((addr >> 8) & MASK_BYTE)
+
 typedef int flag_status_t;
 typedef char flag_t;
+
+typedef int addr_mode_t;
 
 static struct
 {
@@ -54,6 +72,14 @@ static struct
   uint8_t Z : 1;
   uint8_t C : 1;
 } STATUS;
+
+static struct
+{
+  addr_mode_t mode;
+  uint16_t eff_addr;
+  uint8_t fetched;
+  bool page_crossed;
+} ADDR;
 
 static uint8_t MEMORY[MEM_SIZE] = { 0 };
 
@@ -290,3 +316,5 @@ cpu_flag_unset (flag_t flag)
       return;
     }
 }
+
+// Address Mode Operations
