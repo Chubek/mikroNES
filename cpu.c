@@ -1,8 +1,163 @@
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <string.h>
 
+#include "cpu_dispatch.h"
+
+#define MASK_BYTE 0xFF
+#define MASK_WORD 0xFFFF
+
+#define MEM_SIZE 0x10000
+#define ZERO_PAGE_BEGIN 0x0
+#define ZERO_PAGE_END 0xFF
+#define STACK_START 0x0100
+#define STACK_END 0x01FF
+
+#define NMI_VECTOR_ADDR 0xFFFA
+#define RES_VECTOR_ADDR 0xFFFC
+#define IRQ_VECTOR_ADDR 0xFFFE
+
+static struct
+{
+  uint8_t AC;
+  uint8_t XR;
+  uint8_t YR;
+  uint8_t SP;
+  uint16_t PC;
+
+  uint64_t cycles;
+  bool running;
+
+  bool pending_nmi;
+  bool pending_irq;
+} CPU;
+
+static struct
+{
+  uint8_t N : 1;
+  uint8_t V : 1;
+  uint8_t X : 1;
+  uint8_t B : 1;
+  uint8_t D : 1;
+  uint8_t I : 1;
+  uint8_t Z : 1;
+  uint8_t C : 1;
+} STATUS;
+
+static uint8_t MEMORY[MEM_SIZE] = { 0 };
+
+
+
+static inline uint8_t
+cpu_read_mem_byte (uint16_t addr)
+{
+  assert (addr < MEM_SIZE);
+  return MEMORY[addr];
+}
+
+static inline void
+cpu_write_mem_byte (uint16_t addr, uint8_t val)
+{
+  assert (addr < MEM_SIZE);
+  MEMORY[addr] = val;
+}
+
+
+
+static inline uint16_t
+cpu_read_mem_word (uint16_t addr)
+{
+  assert (addr + 1 < MEM_SIZE);
+  uint8_t lo = cpu_read_mem_byte (addr);
+  uint8_t hi = cpu_read_mem_byte (addr + 1);
+  return ((hi << 8) | lo);
+}
+
+static inline void
+cpu_write_mem_word (uint16_t addr, uint16_t val)
+{
+  assert (addr + 1 < MEM_SIZE);
+  uint8_t hi = (val >> 8) & MASK_BYTE;
+  uint8_t lo = val & MASK_BYTE;
+  cpu_write_mem_byte (addr, lo);
+  cpu_write_mem_byte (addr + 1, hi);
+}
+
+
+
+static inline uint8_t
+cpu_read_zeropage_byte (uint8_t zp_addr)
+{
+   assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
+   return cpu_read_zeropage_byte ((uint16_t)zp_addr);
+}
+
+static inline void
+cpu_write_zeropage_byte (uint8_t zp_addr, uint8_t val)
+{
+    assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
+    cpu_write_mem_byte ((uint16_t)zp_addr, val);
+}
+
+
+
+static inline uint8_t
+cpu_read_zeropage_word (uint8_t zp_addr)
+{
+  assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
+uint8_t lo = cpu_read_zeropage_byte (zp_addr);
+  uint8_t hi = cpu_read_zeropage_byte (zp_addr + 1);
+  return ((hi << 8) | lo);
+}
+
+static inline void
+cpu_write_zeropage_word (uint8_t zp_addr, uint16_t val)
+{
+   assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
+   uint8_t hi = (val >> 8) & MASK_BYTE;
+   uint8_t lo = val & MASK_BYTE;
+   cpu_write_zeropage_byte (zp_addr, lo);
+   cpu_write_zeropage_byte (zp_addr + 1, hi);
+}
+
+
+
+static inline void
+cpu_push_stack_byte (uint8_t val)
+{
+  assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
+  cpu_write_mem_byte (CPU.SP--, val);
+}
+
+static inline uint8_t
+cpu_pop_stack_byte (void)
+{
+  assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
+  return cpu_read_mem_byte (++CP.SP);
+}
+
+
+
+static inline void
+cpu_push_stack_word (uint8_t val)
+{
+  assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
+  uint8_t hi = (val >> 8) && MASK_BYTE;
+  uint8_t lo = val && MASK_BYTE;
+  cpu_push_stack_byte (hi);
+  cpu_push_stack_byte (lo);
+}
+
+static inline uint16_t
+cpu_pop_stack_word (void)
+{
+  assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
+  uint8_t lo = cpu_pop_stack_byte ();
+  uint8_t hi = cpu_pop_stack_byte ();
+  return ((hi << 8) | lo);
+}
 
 
