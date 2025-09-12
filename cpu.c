@@ -15,6 +15,7 @@
 #define ZERO_PAGE_END 0xFF
 #define STACK_START 0x0100
 #define STACK_END 0x01FF
+#define PAGE_SIZE 0xFF
 
 #define NMI_VECTOR_ADDR 0xFFFA
 #define RES_VECTOR_ADDR 0xFFFC
