@@ -39,11 +39,10 @@
 #define ADDRMODE_ZPGX 12
 #define ADDRMODE_ZPGY 13
 
-#define CURRENT_PAGE (addr) ((addr >> 8) & MASK_BYTE)
+#define GET_PAGE (addr) ((addr >> 8) & MASK_BYTE)
 
 typedef int flag_status_t;
 typedef char flag_t;
-
 typedef int addr_mode_t;
 
 static struct
@@ -81,7 +80,11 @@ static struct
   bool page_crossed;
 } ADDR;
 
-static uint8_t MEMORY[MEM_SIZE] = { 0 };
+static struct
+{
+  static uint8_t contents[MEM_SIZE] = { 0 };
+  int base_page;
+} MEMORY;
 
 // Raw Memory Operations -- Byte
 
@@ -89,14 +92,14 @@ static inline uint8_t
 cpu_read_mem_byte (uint16_t addr)
 {
   assert (addr < MEM_SIZE);
-  return MEMORY[addr];
+  return MEMORY.contents[addr];
 }
 
 static inline void
 cpu_write_mem_byte (uint16_t addr, uint8_t val)
 {
   assert (addr < MEM_SIZE);
-  MEMORY[addr] = val;
+  MEMORY.contents[addr] = val;
 }
 
 // Raw Memory Operations -- Word
@@ -317,4 +320,204 @@ cpu_flag_unset (flag_t flag)
     }
 }
 
+// Memory-at-PC read helpers
+
+static inline uint8_t
+cpu_read_byte_from_mem_at_pc (void)
+{
+  uint16_t base = CPU.PC;
+  CPU.PC += 1;
+  return cpu_read_mem_byte (base);
+}
+
+static inline uint8_t
+cpu_read_word_from_mem_at_pc (void)
+{
+  uint16_t base = CPU.PC;
+  CPU.PC += 2;
+  return cpu_read_mem_word (base);
+}
+
+static inline uint8_t
+cpu_read_byte_from_mem_at_pc_xoffs (void)
+{
+  uint16_t base = cpu_read_byte_from_mem_at_pc ();
+  return base + CPU.XR;
+}
+
+static inline uint8_t
+cpu_read_byte_from_mem_at_pc_yoffs (void)
+{
+  uint16_t base = cpu_read_byte_from_mem_at_pc ();
+  return base + CPU.YR;
+}
+
+static inline uint16_t
+cpu_read_word_from_mem_at_pc_xoffs (void)
+{
+  uint16_t base = cpu_read_word_from_mem_at_pc ();
+  MEMORY.base_page = GET_PAGE (base);
+  return base + CPU.XR;
+}
+
+static inline uint16_t
+cpu_read_word_from_mem_at_pc_yoffs (void)
+{
+  uint16_t base = cpu_read_word_from_mem_at_pc ();
+  MEMORY.base_page = GET_PAGE (base);
+  return base + CPU.YR;
+}
+
+static inline uint16_t
+cpu_read_word_from_mem_at_pc_indir (void)
+{
+  uint16_t ptr = cpu_read_word_from_mem_at_pc ();
+  uint8_t lo = cpu_read_mem_byte (ptr);
+  uint8_t hi = cpu_read_mem_byte (ptr & 0xFF00 | ((ptr + 1) & 0x00FF));
+  return ((hi << 8) | lo);
+}
+
+static inline uint16_t
+cpu_read_word_from_mem_at_pc_indir_xoffs (void)
+{
+  uint8_t zp = cpu_read_byte_from_mem_at_pc ();
+  uint8_t ptr = zp + CPU.XR;
+  return cpu_read_zeropage_word (ptr);
+}
+
+static inline uint16_t
+cpu_read_word_from_mem_at_pc_indir_offsy (void)
+{
+  uint8_t zp = cpu_read_byte_from_mem_at_pc ();
+  uint16_t base = cpu_read_zeropage_word (zp);
+  MEMORY.base_page = GET_PAGE (base);
+  return base + CPU.YR;
+}
+
+static inline uint16_t
+cpu_read_word_from_mem_at_pc_rel (void)
+{
+  uint8_t off8 = cpu_read_byte_from_mem_at_pc ();
+  int8_t signd = (off8 >= 0x80) ? (off8 - 256) : (int8_t)off8;
+  uint16_t target = CPU.PC + signd;
+  return target;
+}
+
 // Address Mode Operations
+
+static inline uint16_t
+cpu_addrmode_impl (uint16_t)
+{
+  ADDR.mode = ADDRMODE_IMPL;
+  ADDR.eff_addr = 0;
+  ADDR.fetched = 0;
+  ADDR.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_acc (void)
+{
+  ADDR.mode = ADDRMODE_ACC;
+  ADDR.eff_addr = 0;
+  ADDR.fetched = CPU.AC;
+  ADDR.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_imm (void)
+{
+  addr.mode = ADDRMODE_IMM;
+  addr.eff_addr = 0;
+  addr.fetched = cpu_read_mem_byte (cpu.pc++);
+  addr.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_zpg (void)
+{
+  ADDR.mode = ADDRMODE_ZPG;
+  ADDR.eff_addr = cpu_read_byte_from_mem_at_pc ();
+  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_zpgx (void)
+{
+  ADDR.mode = ADDRMODE_ZPGX;
+  ADDR.eff_addr = cpu_read_byte_from_mem_at_pc_xoffs ();
+  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_zpgy (void)
+{
+  ADDR.mode = ADDRMODE_ZPGY;
+  ADDR.eff_addr = cpu_read_byte_from_mem_at_pc_yoffs ();
+  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_abs (void)
+{
+  ADDR.mode = ADDRMODE_ABS;
+  ADDR.eff_addr = cpu_read_word_from_mem_at_pc ();
+  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_absx (void)
+{
+  ADDR.mode = ADDRMODE_ABSX;
+  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_xoffs ();
+  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.page_crossed = MEMORY.base_page != get_page (ADDR.eff_addr);
+}
+
+static inline void
+cpu_addrmode_absy (void)
+{
+  ADDR.mode = ADDRMODE_ABSY;
+  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_yoffs ();
+  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.page_crossed = memory.base_page != get_page (ADDR.eff_addr);
+}
+
+static inline void
+cpu_addrmode_ind (void)
+{
+  ADDR.mode = ADDRMODE_IND;
+  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_indir ();
+  ADDR.fetched = 0;
+  ADDR.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_indx (void)
+{
+  ADDR.mode = ADDRMODE_XIND;
+  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_indir_xoffs ();
+  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.page_crossed = false;
+}
+
+static inline void
+cpu_addrmode_yind (void)
+{
+  ADDR.mode = ADDRMODE_INDY;
+  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_indir_offsy ();
+  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.page_crossed = MEMORY.base_page != GET_PAGE (ADDR.eff_addr);
+}
+
+static inline void
+cpu_addrmode_rel (void)
+{
+  ADDR.mode = ADDRMODE_REL;
+  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_rel ();
+  ADDR.fetched = 0;
+  ADDR.page_crossed = false;
+}
