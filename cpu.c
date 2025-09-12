@@ -49,7 +49,7 @@ static struct
 
 static uint8_t MEMORY[MEM_SIZE] = { 0 };
 
-
+// Raw Memory Operations -- Byte
 
 static inline uint8_t
 cpu_read_mem_byte (uint16_t addr)
@@ -65,7 +65,7 @@ cpu_write_mem_byte (uint16_t addr, uint8_t val)
   MEMORY[addr] = val;
 }
 
-
+// Raw Memory Operations -- Word
 
 static inline uint16_t
 cpu_read_mem_word (uint16_t addr)
@@ -86,7 +86,7 @@ cpu_write_mem_word (uint16_t addr, uint16_t val)
   cpu_write_mem_byte (addr + 1, hi);
 }
 
-
+// Zero Page Memory Operations -- Byte
 
 static inline uint8_t
 cpu_read_zeropage_byte (uint8_t zp_addr)
@@ -102,7 +102,7 @@ cpu_write_zeropage_byte (uint8_t zp_addr, uint8_t val)
     cpu_write_mem_byte ((uint16_t)zp_addr, val);
 }
 
-
+// Zero Page Memory Operations -- Word
 
 static inline uint8_t
 cpu_read_zeropage_word (uint8_t zp_addr)
@@ -123,7 +123,7 @@ cpu_write_zeropage_word (uint8_t zp_addr, uint16_t val)
    cpu_write_zeropage_byte (zp_addr + 1, hi);
 }
 
-
+// Stack Operations -- Byte
 
 static inline void
 cpu_push_stack_byte (uint8_t val)
@@ -139,7 +139,7 @@ cpu_pop_stack_byte (void)
   return cpu_read_mem_byte (++CP.SP);
 }
 
-
+// Stack Operations -- Word
 
 static inline void
 cpu_push_stack_word (uint8_t val)
