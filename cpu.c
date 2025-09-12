@@ -21,6 +21,13 @@
 #define RES_VECTOR_ADDR 0xFFFC
 #define IRQ_VECTOR_ADDR 0xFFFE
 
+#define FLAG_SET 1
+#define FLAG_UNSET 0
+#define FLAG_ERROR -1
+
+typedef int flag_status_t;
+typedef char flag_t;
+
 static struct
 {
   uint8_t AC;
@@ -92,15 +99,15 @@ cpu_write_mem_word (uint16_t addr, uint16_t val)
 static inline uint8_t
 cpu_read_zeropage_byte (uint8_t zp_addr)
 {
-   assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
-   return cpu_read_zeropage_byte ((uint16_t)zp_addr);
+  assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
+  return cpu_read_zeropage_byte ((uint16_t)zp_addr);
 }
 
 static inline void
 cpu_write_zeropage_byte (uint8_t zp_addr, uint8_t val)
 {
-    assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
-    cpu_write_mem_byte ((uint16_t)zp_addr, val);
+  assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
+  cpu_write_mem_byte ((uint16_t)zp_addr, val);
 }
 
 // Zero Page Memory Operations -- Word
@@ -109,7 +116,7 @@ static inline uint8_t
 cpu_read_zeropage_word (uint8_t zp_addr)
 {
   assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
-uint8_t lo = cpu_read_zeropage_byte (zp_addr);
+  uint8_t lo = cpu_read_zeropage_byte (zp_addr);
   uint8_t hi = cpu_read_zeropage_byte (zp_addr + 1);
   return ((hi << 8) | lo);
 }
@@ -117,11 +124,11 @@ uint8_t lo = cpu_read_zeropage_byte (zp_addr);
 static inline void
 cpu_write_zeropage_word (uint8_t zp_addr, uint16_t val)
 {
-   assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
-   uint8_t hi = (val >> 8) & MASK_BYTE;
-   uint8_t lo = val & MASK_BYTE;
-   cpu_write_zeropage_byte (zp_addr, lo);
-   cpu_write_zeropage_byte (zp_addr + 1, hi);
+  assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
+  uint8_t hi = (val >> 8) & MASK_BYTE;
+  uint8_t lo = val & MASK_BYTE;
+  cpu_write_zeropage_byte (zp_addr, lo);
+  cpu_write_zeropage_byte (zp_addr + 1, hi);
 }
 
 // Stack Operations -- Byte
@@ -161,4 +168,125 @@ cpu_pop_stack_word (void)
   return ((hi << 8) | lo);
 }
 
+// Flag Operations
 
+static inline flag_status_t
+cpu_flag_toggle (flag_t flag)
+{
+  switch (flag)
+    {
+    case 'N':
+      STATUS.N = !STATUS.N;
+      return STATUS.N;
+    case 'V':
+      STATUS.V = !STATUS.V;
+      return STATUS.V;
+    case 'B':
+      STATUS.B = !STATUS.B;
+      return STATUS.B;
+    case 'D':
+      STATUS.D = !STATUS.D;
+      return STATUS.D;
+    case 'I':
+      STATUS.I = !STATUS.I;
+      return STATIS.I;
+    case 'Z':
+      STATUS.Z = !STATUS.Z;
+      return STATUS.Z;
+    case 'C':
+      STATUS.C = !STATUS.C;
+      return STATUS.C;
+    default:
+      return FLAG_ERROR;
+    }
+
+  return FLAG_ERROR;
+}
+
+static inline bool
+cpu_flag_is_set (flag_t flag)
+{
+  switch (flag)
+    {
+    case 'N':
+      return STATUS.N == FLAG_SET;
+    case 'V':
+      return STATUS.V == FLAG_SET;
+    case 'B':
+      return STATUS.B == FLAG_SET;
+    case 'D':
+      return STATUS.D == FLAG_SET;
+    case 'I':
+      return STATIS.I == FLAG_SET;
+    case 'Z':
+      return STATUS.Z == FLAG_SET;
+    case 'C':
+      return STATUS.C == FLAG_SET;
+    default:
+      return false;
+    }
+
+  return false;
+}
+
+static inline void
+cpu_flag_set (flag_t flag)
+{
+  switch (flag)
+    {
+    case 'N':
+      STATUS.N = FLAG_SET;
+      return;
+    case 'V':
+      STATUS.V = FLAG_SET;
+      return;
+    case 'B':
+      STATUS.B = FLAG_SET;
+      return;
+    case 'D':
+      STATUS.D = FLAG_SET;
+      return;
+    case 'I':
+      STATIS.I = FLAG_SET;
+      return;
+    case 'Z':
+      STATUS.Z = FLAG_SET;
+      return;
+    case 'C':
+      STATUS.C = FLAG_SET;
+      return;
+    default:
+      return;
+    }
+}
+
+static inline void
+cpu_flag_unset (flag_t flag)
+{
+  switch (flag)
+    {
+    case 'N':
+      STATUS.N = FLAG_UNSET;
+      return;
+    case 'V':
+      STATUS.V = FLAG_UNSET;
+      return;
+    case 'B':
+      STATUS.B = FLAG_UNSET;
+      return;
+    case 'D':
+      STATUS.D = FLAG_UNSET;
+      return;
+    case 'I':
+      STATIS.I = FLAG_UNSET;
+      return;
+    case 'Z':
+      STATUS.Z = FLAG_UNSET;
+      return;
+    case 'C':
+      STATUS.C = FLAG_UNSET;
+      return;
+    default:
+      return;
+    }
+}
