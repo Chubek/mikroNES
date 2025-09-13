@@ -48,8 +48,6 @@
 #define SPECIALCASE_PAGE_CROSS 1
 #define SPECIALCASE_BRANCH_CROSS 2
 
-#define MNEMONIC_SIZE 3
-
 #define GET_PAGE (addr) ((addr >> 8) & MASK_BYTE)
 
 typedef uint8_t special_case_t;
