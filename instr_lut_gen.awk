@@ -2,6 +2,15 @@
 
 BEGIN { FS = "\t" }
 
+BEGIN {
+     flags[0] = "N"
+     flags[1] = "Z"
+     flags[2] = "C"
+     flags[3] = "I"
+     flags[4] = "D"
+     flags[5] = "V"
+}
+
 END { emit_end_case ()  }
 
 {
@@ -12,19 +21,32 @@ END { emit_end_case ()  }
     size = $5
     cycles = $6
 
-    branch_cross = cycles ~ /[0-9]\*\*/ ? 1 : 0
-    page_cross = cycles ~ /[0-9]\*/ ? 1 : 0
+    special[branch_cross] = cycles ~ /[0-9]\*\*/ ? 1 : 0
+    special[page_cross] = cycles ~ /[0-9]\*/ ? 1 : 0
 
-    split(flageffs, flageffs_split, ",")
+    gsub(/\*+/, "", cycles)
+    
+    n_split = split(flageffs, flageffs_split, ",")
+    for (i = 0; i < n_split; i++) {
+	if (flageffs_split[i] ~ flags[i] "=" "+") {
+	    flags_stat[flags[i]] = "FLAGSTAT_MODIFIED"
+	} else if (flageffs_split[i] ~ flags[i] "=" "-") {
+	    flags_stat[flags[i]] = "FLAGSTAT_UNMODIFIED"
+	} else if (flageffs_split[i] ~ flags[i] "=" "0") {
+	    flags_stat[flags[i]] = "FLAGSTAT_CLEARED"
+	} else if (flageffs_split[i] ~ flags[i] "=" "1") {
+	    flags_stat[flags[i]] = "FLAGSTAT_SET"
+	} else if (flageffs_split[i] ~ flags[i] "=" "M6") {
+	    flags_stat[flags[i]] = "FLAGSTAT_M6"
+        } else if (flageffs_split[i] ~ flags[i] "=" "M7") {
+	    flags_stat[flags[i]] = "FLAGSTAT_M7"
+	} else { 
+	    # UNREACHABLE
+	}
+    }
 
-    neff = assess_flageff(flageffs_split[0])
-    zeff = assess_flageff(flageffs_split[1])
-    ceff = assess_flageff(flageffs_split[2])
-    ieff = assess_flageff(flageffs_split[3])
-    deff = assess_flageff(flageffs_split[4])
-    veff = assess_flageff(flageffs_split[5])
 
-    emit_case(opcode, mnemonic, addrmode, size, cycles, neff, zeff, ceff, ieff, deff, veff)
+    emit_case(opcode, mnemonic, addrmode, size, cycles, spcial, flags_stat)
 }
 
 
