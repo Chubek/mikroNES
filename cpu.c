@@ -557,7 +557,7 @@ cpu_instr_lut (uint8_t opcode)
 
    switch (INSTR.opcode)
    {
-	m4_esyscmd(`cat 6502-instrs.tsv | awk -f instr_lut_gen.awk')
+	m4_esyscmd(`cat 6502-instrs.tsv | awk -f instr-lut-gen.awk')m4_dnf
 
 	default:
 	   return;
