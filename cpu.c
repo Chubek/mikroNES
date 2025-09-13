@@ -5,8 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "cpu_dispatch.h"
-
 #define MASK_BYTE 0xFF
 #define MASK_WORD 0xFFFF
 
@@ -38,12 +36,35 @@
 #define ADDRMODE_ZPG 11
 #define ADDRMODE_ZPGX 12
 #define ADDRMODE_ZPGY 13
+#define ADDRMODE_MAXNUM 14
+
+#define FLAGSTAT_UNMODIFIED 0
+#define FLAGSTAT_MODIFIED 1
+#define FLAGSTAT_CLEARED 2
+#define FLAGSTAT_SET 3
+#define FLAGSTAT_M6 4
+#define FLAGSTAT_M7 5
+
+#define SPECIAL_CASE_NONE 0
+#define SPECIAL_CASE_PAGE_CROSS 1
+#define SPECIAL_CASE_BRANCH_CROSS 2
+
+#define MNEMONIC_SIZE 3
 
 #define GET_PAGE (addr) ((addr >> 8) & MASK_BYTE)
 
-typedef int flag_status_t;
+typedef uint8_t special_case_t;
 typedef char flag_t;
+typedef uint8_t flag_state_t;
 typedef int addr_mode_t;
+
+static uint8_t INSTR_SIZE_LUT[ADDRMODE_MAX_NUM] = {
+  [ADDRMODE_ACC] = 1,  [ADDRMODE_ABS] = 3,  [ADDRMODE_ABSX] = 3,
+  [ADDRMODE_ABSY] = 3, [ADDRMODE_IMM] = 2,  [ADDRMODE_IMPL] = 1,
+  [ADDRMODE_IND] = 3,  [ADDRMODE_XIND] = 2, [ADDRMODE_INDY] = 2,
+  [ADDRMODE_REL] = 2,  [ADDRMODE_ZPG] = 2,  [ADDRMODE_ZPGX] = 2,
+  [ADDRMODE_ZPGY] = 2,
+};
 
 static struct
 {
@@ -79,6 +100,22 @@ static struct
   uint8_t fetched;
   bool page_crossed;
 } ADDR;
+
+static struct 
+{
+   uint8_t opcode;
+   address_mode_t address_mode;
+   uint8_t size_bytes;
+   char mnemonic[MNEMONIC_SIZE + 1];
+   uint8_t num_cycles;
+   special_case_t special_case;
+   flag_state_t action_N;
+   flag_state_t action_Z;
+   flag_state_t action_C;
+   flag_state_t action_I;
+   flag_state_t action_D;
+   flag_state_t action_V;
+} INSTR;
 
 static struct
 {
@@ -520,4 +557,17 @@ cpu_addrmode_rel (void)
   ADDR.eff_addr = cpu_read_word_from_mem_at_pc_rel ();
   ADDR.fetched = 0;
   ADDR.page_crossed = false;
+}
+
+// Instruction Lookup Table Function
+
+static void
+cpu_instr_lut (uint8_t opcode)
+{
+   INSTR.opcode = opcode;
+
+   switch (INSTR.opcode)
+   {
+	m4_esyscmd(`awk -f instr_lut_gen.awk')
+   }
 }
