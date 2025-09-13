@@ -36,7 +36,6 @@
 #define ADDRMODE_ZPG 11
 #define ADDRMODE_ZPGX 12
 #define ADDRMODE_ZPGY 13
-#define ADDRMODE_MAXNUM 14
 
 #define FLAGMODSTAT_UNMODIFIED 0
 #define FLAGMODSTAT_MODIFIED 1
@@ -560,6 +559,9 @@ cpu_instr_lut (uint8_t opcode)
 
    switch (INSTR.opcode)
    {
-	m4_esyscmd(`awk -f instr_lut_gen.awk')
+	m4_esyscmd(`cat 6502-instrs.tsv | awk -f instr_lut_gen.awk')
+
+	default:
+	   return;
    }
 }
