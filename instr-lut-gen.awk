@@ -68,31 +68,31 @@ function emit_case(opcode, mnemonic, addrmode, size, cycles, special, flagstat) 
 }
 
 function map_addr_mode(mode) {
-    if (mode ~ /immediate/)
+    if (mode ~ "immediate")
 	return "ADDRMODE_IMM"
-    else if (mode ~ /zeropage/)
+    else if (mode ~ "zeropage")
 	return "ADDRMODE_ZPG"
-     else if (mode ~ /zeropage,X/)
+     else if (mode ~ "zeropage,X")
 	return "ADDRMODE_ZPGX"
-     else if (mode ~ /zeropage,Y/)
+     else if (mode ~ "zeropage,Y")
 	return "ADDRMODE_ZPGY"
-     else if (mode ~ /absolute/)
+     else if (mode ~ "absolute")
 	return "ADDRMODE_ABS"
-     else if (mode ~ /absolute,X/)
+     else if (mode ~ "absolute,X")
 	return "ADDRMODE_ABSX"
-     else if (mode ~ /absolute,Y/)
+     else if (mode ~ "absolute,Y")
 	return "ADDRMODE_ABSY"
-     else if (mode ~ /indirect/)
+     else if (mode ~ "indirect")
 	return "ADDRMODE_IND"
-     else if (mode ~ /indirect,X/)
+     else if (mode ~ "indirect,X")
 	return "ADDRMODE_XIND"
-     else if (mode ~ /indirect,Y/)
+     else if (mode ~ "indirect,Y")
 	return "ADDRMODE_INDY"
-     else if (mode ~ /implied/)
+     else if (mode ~ "implied")
 	return "ADDRMODE_IMPL"
-     else if (mode ~ /relative/)
+     else if (mode ~ "relative")
 	return "ADDRMODE_REL"
-     else if (mode ~ /accumulator/)
+     else if (mode ~ "accumulator")
 	return "ADDRMODE_ACC"
     else {
 	# UNREACHABLE
