@@ -1,4 +1,4 @@
-@include "mnemonic_slot_gen.awk"
+@include "mnemonic-slot-gen.awk"
 
 BEGIN { FS = "\t" }
 
