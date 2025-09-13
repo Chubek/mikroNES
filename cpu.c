@@ -38,16 +38,16 @@
 #define ADDRMODE_ZPGY 13
 #define ADDRMODE_MAXNUM 14
 
-#define FLAGSTAT_UNMODIFIED 0
-#define FLAGSTAT_MODIFIED 1
-#define FLAGSTAT_CLEARED 2
-#define FLAGSTAT_SET 3
-#define FLAGSTAT_M6 4
-#define FLAGSTAT_M7 5
+#define FLAGMODSTAT_UNMODIFIED 0
+#define FLAGMODSTAT_MODIFIED 1
+#define FLAGMODSTAT_CLEARED 2
+#define FLAGMODSTAT_SET 3
+#define FLAGMODSTAT_M6 4
+#define FLAGMODSTAT_M7 5
 
-#define SPECIAL_CASE_NONE 0
-#define SPECIAL_CASE_PAGE_CROSS 1
-#define SPECIAL_CASE_BRANCH_CROSS 2
+#define SPECIALCASE_NONE 0
+#define SPECIALCASE_PAGE_CROSS 1
+#define SPECIALCASE_BRANCH_CROSS 2
 
 #define MNEMONIC_SIZE 3
 
@@ -55,16 +55,8 @@
 
 typedef uint8_t special_case_t;
 typedef char flag_t;
-typedef uint8_t flag_state_t;
+typedef uint8_t flag_modstat_t;
 typedef int addr_mode_t;
-
-static uint8_t INSTR_SIZE_LUT[ADDRMODE_MAX_NUM] = {
-  [ADDRMODE_ACC] = 1,  [ADDRMODE_ABS] = 3,  [ADDRMODE_ABSX] = 3,
-  [ADDRMODE_ABSY] = 3, [ADDRMODE_IMM] = 2,  [ADDRMODE_IMPL] = 1,
-  [ADDRMODE_IND] = 3,  [ADDRMODE_XIND] = 2, [ADDRMODE_INDY] = 2,
-  [ADDRMODE_REL] = 2,  [ADDRMODE_ZPG] = 2,  [ADDRMODE_ZPGX] = 2,
-  [ADDRMODE_ZPGY] = 2,
-};
 
 static struct
 {
@@ -106,15 +98,15 @@ static struct
    uint8_t opcode;
    address_mode_t address_mode;
    uint8_t size_bytes;
-   char mnemonic[MNEMONIC_SIZE + 1];
+   uint8_t mnemonic_slot;
    uint8_t num_cycles;
    special_case_t special_case;
-   flag_state_t action_N;
-   flag_state_t action_Z;
-   flag_state_t action_C;
-   flag_state_t action_I;
-   flag_state_t action_D;
-   flag_state_t action_V;
+   flag_modstat_t action_N;
+   flag_modstat_t action_Z;
+   flag_modstat_t action_C;
+   flag_modstat_t action_I;
+   flag_modstat_t action_D;
+   flag_modstat_t action_V;
 } INSTR;
 
 static struct
@@ -236,7 +228,7 @@ cpu_pop_stack_word (void)
 
 // Flag Operations
 
-static inline flag_status_t
+static inline flag_modstatus_t
 cpu_flag_toggle (flag_t flag)
 {
   switch (flag)
