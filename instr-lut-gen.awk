@@ -31,17 +31,17 @@ BEGIN {
     n_split = split(flagmod, flagmod_split, ",")
 
     for (i = 1; i < n_split; i++) {
-	    if (flagmod_split[i] ~ flags[i] "=M7")
+	    if (flagmod_split[i] == flags[i] "=M7")
 		    flagstat[flags[i]] = "FLAGMODSTAT_M7"
-	    else if (flagmod_split[i] ~ flags[i] "=M6")
+	    else if (flagmod_split[i] == flags[i] "=M6")
 		    flagstat[flags[i]] = "FLAGMODSTAT_M6"
-	    else if (flagmod_split[i] ~ flags[i] "=0")
+	    else if (flagmod_split[i] == flags[i] "=0")
 		    flagstat[flags[i]] = "FLAGMODSTAT_CLEARED"
-	    else if (flagmod_split[i] ~ flags[i] "=1")
+	    else if (flagmod_split[i] == flags[i] "=1")
 		    flagstat[flags[i]] = "FLAGMODSTAT_SET"
-	    else if (flagmod_split[i] ~ flags[i] "=-")
+	    else if (flagmod_split[i] == flags[i] "=-")
 		    flagstat[flags[i]] = "FLAGMODSTAT_CLEARED"
-	    else if (flagmod_split[i] ~ flags[i] "=+")
+	    else if (flagmod_split[i] == flags[i] "=+")
 		    flagstat[flags[i]] = "FLAGMODSTAT_MODIFIED"
 	    else {
 		    # UNREACHABLE
@@ -68,31 +68,31 @@ function emit_case(opcode, mnemonic, addrmode, size, cycles, special, flagstat) 
 }
 
 function map_addr_mode(mode) {
-    if (mode ~ "immediate")
+    if (mode == "immediate")
 	return "ADDRMODE_IMM"
-    else if (mode ~ "zeropage")
+    else if (mode == "zeropage")
 	return "ADDRMODE_ZPG"
-     else if (mode ~ "zeropage,X")
+     else if (mode == "zeropageX")
 	return "ADDRMODE_ZPGX"
-     else if (mode ~ "zeropage,Y")
+     else if (mode == "zeropageY")
 	return "ADDRMODE_ZPGY"
-     else if (mode ~ "absolute")
+     else if (mode == "absolute")
 	return "ADDRMODE_ABS"
-     else if (mode ~ "absolute,X")
+     else if (mode == "absoluteX")
 	return "ADDRMODE_ABSX"
-     else if (mode ~ "absolute,Y")
+     else if (mode == "absoluteY")
 	return "ADDRMODE_ABSY"
-     else if (mode ~ "indirect")
+     else if (mode == "indirect")
 	return "ADDRMODE_IND"
-     else if (mode ~ "indirect,X")
+     else if (mode == "indirectX")
 	return "ADDRMODE_XIND"
-     else if (mode ~ "indirect,Y")
+     else if (mode == "indirectY")
 	return "ADDRMODE_INDY"
-     else if (mode ~ "implied")
+     else if (mode == "implied")
 	return "ADDRMODE_IMPL"
-     else if (mode ~ "relative")
+     else if (mode == "relative")
 	return "ADDRMODE_REL"
-     else if (mode ~ "accumulator")
+     else if (mode == "accumulator")
 	return "ADDRMODE_ACC"
     else {
 	# UNREACHABLE
