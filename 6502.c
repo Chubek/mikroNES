@@ -712,7 +712,7 @@ cpu_sbc_decimal (uint8_t subtrahend)
   CPU.ACC = result;
 }
 
-// Conditional Helpers
+// Read-Modify-Write Helpers
 
 static uint8_t
 cpu_rmw_helper (uint16_t addr, u8_identity_t op)
@@ -722,6 +722,8 @@ cpu_rmw_helper (uint16_t addr, u8_identity_t op)
     cpu_mem_write_byte (addr, new);
     return new;
 }
+
+// Comparison Helpers
 
 static bool
 cpu_cmp_helper (uint8_t reg_val, uint8_t operand)
