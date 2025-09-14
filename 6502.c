@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 
 #define MASK_BYTE 0xFF
 #define MASK_WORD 0xFFFF
+#define MASK_COMPLEMENT 0x80
 
 #define MEM_SIZE 0x10000
 #define ZERO_PAGE_BEGIN 0x0
@@ -90,20 +92,20 @@ static struct
   bool page_crossed;
 } ADDR;
 
-static struct 
+static struct
 {
-   uint8_t opcode;
-   address_mode_t address_mode;
-   uint8_t size_bytes;
-   uint8_t mnemonic_slot;
-   uint8_t num_cycles;
-   special_case_t special_case;
-   flag_modstat_t action_N;
-   flag_modstat_t action_Z;
-   flag_modstat_t action_C;
-   flag_modstat_t action_I;
-   flag_modstat_t action_D;
-   flag_modstat_t action_V;
+  uint8_t opcode;
+  address_mode_t address_mode;
+  uint8_t size_bytes;
+  uint8_t mnemonic_slot;
+  uint8_t addend_cycles;
+  special_case_t special_case;
+  flag_modstat_t action_N;
+  flag_modstat_t action_Z;
+  flag_modstat_t action_C;
+  flag_modstat_t action_I;
+  flag_modstat_t action_D;
+  flag_modstat_t action_V;
 } INSTR;
 
 static struct
@@ -346,6 +348,29 @@ cpu_flag_unset (flag_t flag)
     }
 }
 
+static inline void
+cpu_set_flag_if (flag_t flag, bool sw)
+{
+  if (sw)
+    cpu_flag_set (flag);
+  else
+    cpu_flag_unset (flag);
+}
+
+static inline void
+cpu_set_flag_zn (uint8_t value)
+{
+  if (value & MASK_BYTE == 0)
+    cpu_flag_set ('Z');
+  else
+    cpu_flag_unset ('Z');
+
+  if (value & MASK_COMPLEMENT != 0)
+    cpu_flag_set ('N');
+  else
+    cpu_flag_unset ('N');
+}
+
 // Memory-at-PC read helpers
 
 static inline uint8_t
@@ -553,13 +578,72 @@ cpu_addrmode_rel (void)
 static void
 cpu_instr_lut (uint8_t opcode)
 {
-   INSTR.opcode = opcode;
+  INSTR.opcode = opcode;
 
-   switch (INSTR.opcode)
-   {
-	m4_esyscmd(`cat 6502-instrs.tsv | awk -f instr-lut-gen.awk')m4_dnl
+  switch (INSTR.opcode)
+    {
+        m4_esyscmd(`cat 6502-instrs.tsv | awk -f instr-lut-gen.awk')m4_dnl
 
 	default:
 	   return;
-   }
+    }
+}
+
+// Arithmetic Helpers
+
+static void
+cpu_adc_binary (uint8_t addend)
+{
+  int carry_in = cpu_flag_is_set ('C') ? 1 : 0;
+  uint8_t acc = CPU.ACC;
+  uint16_t sum9 = acc + addend + carry_in;
+  uint8_t result = sum9 & MASK_BYTE;
+
+  bool overflow = ((((acc ^ addend) & MASK_COMPLEMENT) == 0)
+                   && (((acc ^ result) ^ MASK_COMPLMENT)) != 0);
+
+  cpu_set_flag_if ('C', sum9 > UCHAR_MAX);
+  cpu_set_flag_zn (result);
+  cpu_set_flag_if ('V', overflow);
+
+  CPU.ACC = result;
+}
+
+static void
+cpu_adc_decimal (uint8_t addend)
+{
+  int carry_in = cpu_flag_is_set ('C') ? 1 : 0;
+  uint8_t acc = CPU.ACC;
+
+  uint16_t bin_sum = (acc + addend + carry_in);
+  uint8_t bin_res = bin_sum & MASK_BYTE;
+
+  bool overflow = (((acc ^ addend) & MASK_COMPLEMENT) == 0)
+                  && (((acc ^ bin_res) & MASK_COMPLEMENT != 0));
+
+  uint8_t lo = (acc & 0x0F) + (addend & 0x0F) + carry_in;
+  uint8_t adjust_lo = 0;
+
+  if (lo > 9)
+    {
+      lo += 6;
+      adjust_lo = 1;
+    }
+
+  uint8_t hi = (acc >> 4) + (addend >> 4) + adjust_lo;
+  bool carry_out = false;
+
+  if (hi > 9)
+    {
+      hi += 6;
+      carry_out = true;
+    }
+
+  uint8_t result = ((hi << 4) | (lo 0x0F)) & MASK_BYTE;
+
+  cpu_set_flag_if ('C', carry_out);
+  cpu_set_flag_zn (result);
+  cpu_set_flag_if ('V', overflow);
+
+  CPU.ACC = result;
 }
