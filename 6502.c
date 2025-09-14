@@ -10,6 +10,8 @@
 #define MASK_WORD 0xFFFF
 #define MASK_BCD 0x0F
 #define MASK_DIFF 0x1FF
+#define MASK_LSR 0x01
+#define MASK_BIT 0x40
 #define MASK_COMPLEMENT 0x80
 
 #define MEM_SIZE 0x10000
@@ -121,14 +123,14 @@ static struct
 // Raw Memory Operations -- Byte
 
 static inline uint8_t
-cpu_read_mem_byte (uint16_t addr)
+cpu_mem_read_byte (uint16_t addr)
 {
   assert (addr < MEM_SIZE);
   return MEMORY.contents[addr];
 }
 
 static inline void
-cpu_write_mem_byte (uint16_t addr, uint8_t val)
+cpu_mem_write_byte (uint16_t addr, uint8_t val)
 {
   assert (addr < MEM_SIZE);
   MEMORY.contents[addr] = val;
@@ -137,95 +139,95 @@ cpu_write_mem_byte (uint16_t addr, uint8_t val)
 // Raw Memory Operations -- Word
 
 static inline uint16_t
-cpu_read_mem_word (uint16_t addr)
+cpu_mem_read_word (uint16_t addr)
 {
   assert (addr + 1 < MEM_SIZE);
-  uint8_t lo = cpu_read_mem_byte (addr);
-  uint8_t hi = cpu_read_mem_byte (addr + 1);
+  uint8_t lo = cpu_mem_read_byte (addr);
+  uint8_t hi = cpu_mem_read_byte (addr + 1);
   return ((hi << 8) | lo);
 }
 
 static inline void
-cpu_write_mem_word (uint16_t addr, uint16_t val)
+cpu_mem_write_word (uint16_t addr, uint16_t val)
 {
   assert (addr + 1 < MEM_SIZE);
   uint8_t hi = (val >> 8) & MASK_BYTE;
   uint8_t lo = val & MASK_BYTE;
-  cpu_write_mem_byte (addr, lo);
-  cpu_write_mem_byte (addr + 1, hi);
+  cpu_mem_write_byte (addr, lo);
+  cpu_mem_write_byte (addr + 1, hi);
 }
 
 // Zero Page Memory Operations -- Byte
 
 static inline uint8_t
-cpu_read_zeropage_byte (uint8_t zp_addr)
+cpu_zpg_read_byte (uint8_t zp_addr)
 {
   assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
-  return cpu_read_zeropage_byte ((uint16_t)zp_addr);
+  return cpu_zpg_read_byte ((uint16_t)zp_addr);
 }
 
 static inline void
-cpu_write_zeropage_byte (uint8_t zp_addr, uint8_t val)
+cpu_zpg_write_byte (uint8_t zp_addr, uint8_t val)
 {
   assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
-  cpu_write_mem_byte ((uint16_t)zp_addr, val);
+  cpu_mem_write_byte ((uint16_t)zp_addr, val);
 }
 
 // Zero Page Memory Operations -- Word
 
 static inline uint8_t
-cpu_read_zeropage_word (uint8_t zp_addr)
+cpu_zpg_read_word (uint8_t zp_addr)
 {
   assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
-  uint8_t lo = cpu_read_zeropage_byte (zp_addr);
-  uint8_t hi = cpu_read_zeropage_byte (zp_addr + 1);
+  uint8_t lo = cpu_zpg_read_byte (zp_addr);
+  uint8_t hi = cpu_zpg_read_byte (zp_addr + 1);
   return ((hi << 8) | lo);
 }
 
 static inline void
-cpu_write_zeropage_word (uint8_t zp_addr, uint16_t val)
+cpu_zpg_write_word (uint8_t zp_addr, uint16_t val)
 {
   assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
   uint8_t hi = (val >> 8) & MASK_BYTE;
   uint8_t lo = val & MASK_BYTE;
-  cpu_write_zeropage_byte (zp_addr, lo);
-  cpu_write_zeropage_byte (zp_addr + 1, hi);
+  cpu_zpg_write_byte (zp_addr, lo);
+  cpu_zpg_write_byte (zp_addr + 1, hi);
 }
 
 // Stack Operations -- Byte
 
 static inline void
-cpu_push_stack_byte (uint8_t val)
+cpu_stack_push_byte (uint8_t val)
 {
   assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
-  cpu_write_mem_byte (CPU.SP--, val);
+  cpu_mem_write_byte (CPU.SP--, val);
 }
 
 static inline uint8_t
-cpu_pop_stack_byte (void)
+cpu_stack_pop_byte (void)
 {
   assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
-  return cpu_read_mem_byte (++CP.SP);
+  return cpu_mem_read_byte (++CP.SP);
 }
 
 // Stack Operations -- Word
 
 static inline void
-cpu_push_stack_word (uint8_t val)
+cpu_stack_push_word (uint8_t val)
 {
   assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
   uint8_t hi = (val >> 8) && MASK_BYTE;
   uint8_t lo = val && MASK_BYTE;
-  cpu_push_stack_byte (hi);
-  cpu_push_stack_byte (lo);
+  cpu_stack_push_byte (hi);
+  cpu_stack_push_byte (lo);
 }
 
 static inline uint16_t
-cpu_pop_stack_word (void)
+cpu_stack_pop_word (void)
 {
   assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
-  uint8_t lo = cpu_pop_stack_byte ();
-  uint8_t hi = cpu_pop_stack_byte ();
+  uint8_t lo = cpu_stack_pop_byte ();
+  uint8_t hi = cpu_stack_pop_byte ();
   return ((hi << 8) | lo);
 }
 
@@ -353,7 +355,7 @@ cpu_flag_unset (flag_t flag)
 }
 
 static inline void
-cpu_set_flag_if (flag_t flag, bool sw)
+cpu_flag_set_if (flag_t flag, bool sw)
 {
   if (sw)
     cpu_flag_set (flag);
@@ -362,7 +364,7 @@ cpu_set_flag_if (flag_t flag, bool sw)
 }
 
 static inline void
-cpu_set_flag_zn (uint8_t value)
+cpu_flag_set_zn (uint8_t value)
 {
   if (value & MASK_BYTE == 0)
     cpu_flag_set ('Z');
@@ -378,81 +380,81 @@ cpu_set_flag_zn (uint8_t value)
 // Memory-at-PC read helpers
 
 static inline uint8_t
-cpu_read_byte_from_mem_at_pc (void)
+cpu_mem_read_byte_from_at_pc (void)
 {
   uint16_t base = CPU.PC;
   CPU.PC += 1;
-  return cpu_read_mem_byte (base);
+  return cpu_mem_read_byte (base);
 }
 
 static inline uint8_t
-cpu_read_word_from_mem_at_pc (void)
+cpu_mem_read_word_from_at_pc (void)
 {
   uint16_t base = CPU.PC;
   CPU.PC += 2;
-  return cpu_read_mem_word (base);
+  return cpu_mem_read_word (base);
 }
 
 static inline uint8_t
-cpu_read_byte_from_mem_at_pc_xoffs (void)
+cpu_mem_read_byte_from_at_pc_xoffs (void)
 {
-  uint16_t base = cpu_read_byte_from_mem_at_pc ();
+  uint16_t base = cpu_mem_read_byte_from_at_pc ();
   return base + CPU.XR;
 }
 
 static inline uint8_t
-cpu_read_byte_from_mem_at_pc_yoffs (void)
+cpu_mem_read_byte_from_at_pc_yoffs (void)
 {
-  uint16_t base = cpu_read_byte_from_mem_at_pc ();
+  uint16_t base = cpu_mem_read_byte_from_at_pc ();
   return base + CPU.YR;
 }
 
 static inline uint16_t
-cpu_read_word_from_mem_at_pc_xoffs (void)
+cpu_mem_read_word_from_at_pc_xoffs (void)
 {
-  uint16_t base = cpu_read_word_from_mem_at_pc ();
+  uint16_t base = cpu_mem_read_word_from_at_pc ();
   MEMORY.base_page = GET_PAGE (base);
   return base + CPU.XR;
 }
 
 static inline uint16_t
-cpu_read_word_from_mem_at_pc_yoffs (void)
+cpu_mem_read_word_from_at_pc_yoffs (void)
 {
-  uint16_t base = cpu_read_word_from_mem_at_pc ();
+  uint16_t base = cpu_mem_read_word_from_at_pc ();
   MEMORY.base_page = GET_PAGE (base);
   return base + CPU.YR;
 }
 
 static inline uint16_t
-cpu_read_word_from_mem_at_pc_indir (void)
+cpu_mem_read_word_from_at_pc_indir (void)
 {
-  uint16_t ptr = cpu_read_word_from_mem_at_pc ();
-  uint8_t lo = cpu_read_mem_byte (ptr);
-  uint8_t hi = cpu_read_mem_byte (ptr & 0xFF00 | ((ptr + 1) & 0x00FF));
+  uint16_t ptr = cpu_mem_read_word_from_at_pc ();
+  uint8_t lo = cpu_mem_read_byte (ptr);
+  uint8_t hi = cpu_mem_read_byte (ptr & 0xFF00 | ((ptr + 1) & 0x00FF));
   return ((hi << 8) | lo);
 }
 
 static inline uint16_t
-cpu_read_word_from_mem_at_pc_indir_xoffs (void)
+cpu_mem_read_word_from_at_pc_indir_xoffs (void)
 {
-  uint8_t zp = cpu_read_byte_from_mem_at_pc ();
+  uint8_t zp = cpu_mem_read_byte_from_at_pc ();
   uint8_t ptr = zp + CPU.XR;
-  return cpu_read_zeropage_word (ptr);
+  return cpu_zpg_read_word (ptr);
 }
 
 static inline uint16_t
-cpu_read_word_from_mem_at_pc_indir_offsy (void)
+cpu_mem_read_word_from_at_pc_indir_offsy (void)
 {
-  uint8_t zp = cpu_read_byte_from_mem_at_pc ();
-  uint16_t base = cpu_read_zeropage_word (zp);
+  uint8_t zp = cpu_mem_read_byte_from_at_pc ();
+  uint16_t base = cpu_zpg_read_word (zp);
   MEMORY.base_page = GET_PAGE (base);
   return base + CPU.YR;
 }
 
 static inline uint16_t
-cpu_read_word_from_mem_at_pc_rel (void)
+cpu_mem_read_word_from_at_pc_rel (void)
 {
-  uint8_t off8 = cpu_read_byte_from_mem_at_pc ();
+  uint8_t off8 = cpu_mem_read_byte_from_at_pc ();
   int8_t signd = (off8 >= 0x80) ? (off8 - 256) : (int8_t)off8;
   uint16_t target = CPU.PC + signd;
   return target;
@@ -483,7 +485,7 @@ cpu_addrmode_imm (void)
 {
   addr.mode = ADDRMODE_IMM;
   addr.eff_addr = 0;
-  addr.fetched = cpu_read_mem_byte (cpu.pc++);
+  addr.fetched = cpu_mem_read_byte (cpu.pc++);
   addr.page_crossed = false;
 }
 
@@ -491,8 +493,8 @@ static inline void
 cpu_addrmode_zpg (void)
 {
   ADDR.mode = ADDRMODE_ZPG;
-  ADDR.eff_addr = cpu_read_byte_from_mem_at_pc ();
-  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.eff_addr = cpu_mem_read_byte_from_at_pc ();
+  ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
 
@@ -500,8 +502,8 @@ static inline void
 cpu_addrmode_zpgx (void)
 {
   ADDR.mode = ADDRMODE_ZPGX;
-  ADDR.eff_addr = cpu_read_byte_from_mem_at_pc_xoffs ();
-  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.eff_addr = cpu_mem_read_byte_from_at_pc_xoffs ();
+  ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
 
@@ -509,8 +511,8 @@ static inline void
 cpu_addrmode_zpgy (void)
 {
   ADDR.mode = ADDRMODE_ZPGY;
-  ADDR.eff_addr = cpu_read_byte_from_mem_at_pc_yoffs ();
-  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.eff_addr = cpu_mem_read_byte_from_at_pc_yoffs ();
+  ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
 
@@ -518,8 +520,8 @@ static inline void
 cpu_addrmode_abs (void)
 {
   ADDR.mode = ADDRMODE_ABS;
-  ADDR.eff_addr = cpu_read_word_from_mem_at_pc ();
-  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.eff_addr = cpu_mem_read_word_from_at_pc ();
+  ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
 
@@ -527,8 +529,8 @@ static inline void
 cpu_addrmode_absx (void)
 {
   ADDR.mode = ADDRMODE_ABSX;
-  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_xoffs ();
-  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_xoffs ();
+  ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = MEMORY.base_page != get_page (ADDR.eff_addr);
 }
 
@@ -536,8 +538,8 @@ static inline void
 cpu_addrmode_absy (void)
 {
   ADDR.mode = ADDRMODE_ABSY;
-  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_yoffs ();
-  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_yoffs ();
+  ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = memory.base_page != get_page (ADDR.eff_addr);
 }
 
@@ -545,7 +547,7 @@ static inline void
 cpu_addrmode_ind (void)
 {
   ADDR.mode = ADDRMODE_IND;
-  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_indir ();
+  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_indir ();
   ADDR.fetched = 0;
   ADDR.page_crossed = false;
 }
@@ -554,8 +556,8 @@ static inline void
 cpu_addrmode_indx (void)
 {
   ADDR.mode = ADDRMODE_XIND;
-  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_indir_xoffs ();
-  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_indir_xoffs ();
+  ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
 
@@ -563,8 +565,8 @@ static inline void
 cpu_addrmode_yind (void)
 {
   ADDR.mode = ADDRMODE_INDY;
-  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_indir_offsy ();
-  ADDR.fetched = cpu_read_mem_byte (ADDR.eff_addr);
+  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_indir_offsy ();
+  ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = MEMORY.base_page != GET_PAGE (ADDR.eff_addr);
 }
 
@@ -572,7 +574,7 @@ static inline void
 cpu_addrmode_rel (void)
 {
   ADDR.mode = ADDRMODE_REL;
-  ADDR.eff_addr = cpu_read_word_from_mem_at_pc_rel ();
+  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_rel ();
   ADDR.fetched = 0;
   ADDR.page_crossed = false;
 }
@@ -596,7 +598,7 @@ cpu_instr_lut (uint8_t opcode)
 // Arithmetic Helpers
 
 static void
-cpu_adc_binary (uint8_t addend)
+cpu_helper_adc_binary (uint8_t addend)
 {
   int carry_in = cpu_flag_is_set ('C') ? 1 : 0;
   uint8_t acc = CPU.ACC;
@@ -606,15 +608,15 @@ cpu_adc_binary (uint8_t addend)
   bool overflow = ((((acc ^ addend) & MASK_COMPLEMENT) == 0)
                    && (((acc ^ result) ^ MASK_COMPLMENT)) != 0);
 
-  cpu_set_flag_if ('C', sum9 > UCHAR_MAX);
-  cpu_set_flag_zn (result);
-  cpu_set_flag_if ('V', overflow);
+  cpu_flag_set_if ('C', sum9 > UCHAR_MAX);
+  cpu_flag_set_zn (result);
+  cpu_flag_set_if ('V', overflow);
 
   CPU.ACC = result;
 }
 
 static void
-cpu_adc_decimal (uint8_t addend)
+cpu_helper_adc_decimal (uint8_t addend)
 {
   int carry_in = cpu_flag_is_set ('C') ? 1 : 0;
   uint8_t acc = CPU.ACC;
@@ -645,15 +647,15 @@ cpu_adc_decimal (uint8_t addend)
 
   uint8_t result = ((hi << 4) | (lo MASK_BCD)) & MASK_BYTE;
 
-  cpu_set_flag_if ('C', carry_out);
-  cpu_set_flag_zn (result);
-  cpu_set_flag_if ('V', overflow);
+  cpu_flag_set_if ('C', carry_out);
+  cpu_flag_set_zn (result);
+  cpu_flag_set_if ('V', overflow);
 
   CPU.ACC = result;
 }
 
 static void
-cpu_sbc_binary (uint8_t subtrahend)
+cpu_helper_sbc_binary (uint8_t subtrahend)
 {
   int carry_in = cpu_flag_is_set ('C') ? 1 : 0;
   uint8_t acc = CPU.ACC;
@@ -665,15 +667,15 @@ cpu_sbc_binary (uint8_t subtrahend)
   bool overflow = ((acc ^ subtrahend_inverted & MASK_COMPLEMENT) == 0)
                   && (((acc ^ result) & MASK_COMPLEMENT) != 0);
 
-  cpu_set_flag_if ('C', sum9 > UCHAR_MAX);
-  cpu_set_flag_zn (result);
-  cpu_set_flag_if ('V', overflow);
+  cpu_flag_set_if ('C', sum9 > UCHAR_MAX);
+  cpu_flag_set_zn (result);
+  cpu_flag_set_if ('V', overflow);
 
   CPU.ACC = result;
 }
 
 static void
-cpu_sbc_decimal (uint8_t subtrahend)
+cpu_helper_sbc_decimal (uint8_t subtrahend)
 {
   int carry_in = cpu_flag_is_set ('C') ? 1 : 0;
   uint8_t acc = CPU.ACC;
@@ -705,9 +707,9 @@ cpu_sbc_decimal (uint8_t subtrahend)
 
   uint8_t result = ((hi << 4) | (lo & MASK_BCD)) & MASK_BYTE;
 
-  cpu_set_flag_if ('C', carry_out);
-  cpu_set_flag_zn (result);
-  cpu_set_flag_if ('V', overflow);
+  cpu_flag_set_if ('C', carry_out);
+  cpu_flag_set_zn (result);
+  cpu_flag_set_if ('V', overflow);
 
   CPU.ACC = result;
 }
@@ -715,7 +717,7 @@ cpu_sbc_decimal (uint8_t subtrahend)
 // Read-Modify-Write Helpers
 
 static uint8_t
-cpu_rmw_helper (uint16_t addr, u8_identity_t op)
+cpu_helper_rmw (uint16_t addr, u8_identity_t op)
 {
   uint8_t val = cpu_mem_read_byte (addr);
   uint8_t new = op (val);
@@ -726,11 +728,11 @@ cpu_rmw_helper (uint16_t addr, u8_identity_t op)
 // Comparison Helpers
 
 static bool
-cpu_cmp_helper (uint8_t reg_val, uint8_t operand)
+cpu_helper_cmp (uint8_t reg_val, uint8_t operand)
 {
   int16_t diff = (reg_val - operand) & MASK_DIFF;
-  cpu_set_flag_if ('C', reg_val >= operand);
-  cpu_set_flag - zn ((uint8_t)(diff & MASK_BYTE));
+  cpu_flag_set_if ('C', reg_val >= operand);
+  cpu_flag_set - zn ((uint8_t)(diff & MASK_BYTE));
 }
 
 // Micro-op helpers
@@ -739,21 +741,21 @@ static inline void
 cpu_op_lda (uint8_t val)
 {
   CPU.ACC = val & MASK_BYTE;
-  cpu_set_flag_zn (CPU.ACC);
+  cpu_flag_set_zn (CPU.ACC);
 }
 
 static inline void
 cpu_op_ldx (uint8_t val)
 {
   CPU.XR = val & MASK_BYTE;
-  cpu_set_flag_zn (CPU.XR);
+  cpu_flag_set_zn (CPU.XR);
 }
 
 static inline void
 cpu_op_ldy (uint8_t val)
 {
   CPU.YR = val & MASK_BYTE;
-  cpu_set_flag_zn (CPU.YR);
+  cpu_flag_set_zn (CPU.YR);
 }
 
 static inline void
@@ -778,37 +780,326 @@ static inline void
 cpu_op_and (uint8_t val)
 {
   CPU.ACC &= val & MASK_BYTE;
-  cpu_set_flag_zn (CPU.ACC);
+  cpu_flag_set_zn (CPU.ACC);
 }
 
 static inline void
 cpu_op_ora (uint8_t val)
 {
   CPU.ACC |= val & MASK_BYTE;
-  cpu_set_flag_zn (CPU.ACC);
+  cpu_flag_set_zn (CPU.ACC);
 }
 
 static inline void
 cpu_op_eor (uint8_t val)
 {
   CPU.ACC ^= val & MASK_BYTE;
-  cpu_set_flag_zn (CPU.ACC);
+  cpu_flag_set_zn (CPU.ACC);
 }
 
 static inline void
 cpu_op_adc (uint8_t val)
 {
   if (cpu_flag_is_set ('D'))
-    cpu_adc_decimal (val);
+    cpu_helper_adc_decimal (val);
   else
-    cpu_adc_binary (val);
+    cpu_helper_adc_binary (val);
 }
 
 static inline void
 cpu_op_sbc (uint8_t val)
 {
   if (cpu_flag_is_set ('D'))
-    cpu_sbc_decimal (val);
+    cpu_helper_sbc_decimal (val);
   else
-    cpu_sbc_binary (val);
+    cpu_helper_sbc_binary (val);
+}
+
+static inline void
+cpu_op_asl (uint8_t val)
+{
+  cpu_flag_set_if ('C', (value & MASK_COMPLEMENT) != 0);
+  CPU.ACC = (val << 1) & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+
+static inline void
+cpu_op_lsr (uint8_t val)
+{
+  cpu_flag_set_if ('C', (val & MASK_LSR) != 0);
+  CPU.ACC = (val >> 1) & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+
+static inline void
+cpu_op_rol (uint8_t val)
+{
+  int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
+  cpu_flag_set_if ('C', (val & MASK_COMPLEMENT) != 0);
+  CPU.ACC = ((val << 1) | old_flag) & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+
+static inline void
+cpu_op_rol (uint8_t val)
+{
+  int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
+  cpu_flag_set_if ('C', (val & MASK_LSR) != 0);
+  CPU.ACC = ((val >> 1) | (old_flag << 7)) & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+
+static inline void
+cpu_op_bit (uint8_t val)
+{
+  cpu_flag_set_if ('Z', ((CPU.ACC & val) & MASK_BYTE) == 0);
+  cpu_flag_set_if ('N', (val & MASK_COMPLEMENT) != 0);
+  cpu_flag_set_if ('V', (val & MASK_BIT) != 0);
+}
+
+static inline void
+cpu_op_inc (uint16_t addr)
+{
+  uint8_t new = (cpu_mem_read_byte (addr) + 1) & MASK_BYTE;
+  cpu_mem_write_byte (addr, new);
+  cpu_flag_set_zn (new);
+}
+
+static inline void
+cpu_op_inc (uint16_t addr)
+{
+  uint8_t new (cpu_mem_read_byte (addr) - 1) & MASK_BYTE;
+  cpu_mem_write_byte (addr, new);
+  cpu_flag_set_zn (new);
+}
+
+static inline void
+cpu_op_tax (void)
+{
+  CPU.XR = CPU.ACC;
+  cpu_flag_set_zn (C.XR);
+}
+
+static inline void
+cpu_op_tax (void)
+{
+  CPU.XR = CPU.ACC;
+  cpu_flag_set_zn (C.XR);
+}
+
+static inline void
+cpu_op_tax (void)
+{
+  CPU.XR = CPU.ACC;
+  cpu_flag_set_zn (C.XR);
+}
+
+static inline void
+cpu_op_tax (void)
+{
+  CPU.XR = CPU.ACC;
+  cpu_flag_set_zn (C.XR);
+}
+
+static inline void
+cpu_op_txa (void)
+{
+  CPU.ACC = CPU.XR;
+  cpu_flag_set_zn (C.ACC);
+}
+
+static inline void
+cpu_op_tay (void)
+{
+  CPU.YR = CPU.ACC;
+  cpu_flag_set_zn (C.YR);
+}
+
+static inline void
+cpu_op_tya (void)
+{
+  CPU.ACC = CPU.YR;
+  cpu_flag_set_zn (C.ACC);
+}
+
+static inline void
+cpu_op_tsx (void)
+{
+  CPU.XR = CPU.SP;
+  cpu_flag_set_zn (C.XR);
+}
+
+static inline void
+cpu_op_txs (void)
+{
+  CPU.SP = CPU.XR;
+}
+
+static inline void
+cpu_op_inx (void)
+{
+  CPU.XR++;
+  cpu_flag_set_zn (C.XR);
+}
+
+static inline void
+cpu_op_inx (void)
+{
+  CPU.XR++;
+  cpu_flag_set_zn (C.XR);
+}
+
+static inline void
+cpu_op_iny (void)
+{
+  CPU.YR++;
+  cpu_flag_set_zn (C.YR);
+}
+
+static inline void
+cpu_op_dex (void)
+{
+  CPU.XR--;
+  cpu_flag_set_zn (C.XR);
+}
+
+static inline void
+cpu_op_dey (void)
+{
+  CPU.YR--;
+  cpu_flag_set_zn (C.YR);
+}
+
+static inline void
+cpu_op_cmp (uint8_t val)
+{
+  cpu_helper_cmp (CPU.ACC, val);
+}
+
+static inline void
+cpu_op_cpx (uint8_t val)
+{
+  cpu_helper_cmp (CPU.XR, val);
+}
+
+static inline void
+cpu_op_cpy (uint8_t val)
+{
+  cpu_helper_cmp (CPU.YR, val);
+}
+
+static inline void
+cpu_op_clc (void)
+{
+  cpu_flag_unset ('C');
+}
+
+static inline void
+cpu_op_sec (void)
+{
+  cpu_flag_set ('C');
+}
+
+static inline void
+cpu_op_cld (void)
+{
+  cpu_flag_unset ('D');
+}
+
+static inline void
+cpu_op_sed (void)
+{
+  cpu_flag_set ('D');
+}
+
+static inline void
+cpu_op_cli (void)
+{
+  cpu_flag_unset ('I');
+}
+
+static inline void
+cpu_op_sei (void)
+{
+  cpu_flag_set ('I');
+}
+
+static inline void
+cpu_op_clv (void)
+{
+  cpu_flag_unset ('V');
+}
+
+static inline void
+cpu_op_nop (void)
+{
+  return;
+}
+
+static inline void
+cpu_op_pha (void)
+{
+  cpu_stack_push_byte (CPU.ACC);
+}
+
+static inline void
+cpu_op_pla (void)
+{
+  CPU.ACC = cpu_stack_pop_byte ();
+}
+
+static inline void
+cpu_op_php (void)
+{
+  cpu_stack_push_byte (STATUS.B & MASK_BYTE);
+  STATUS.X = 1;
+}
+
+static inline void
+cpu_op_plp (void)
+{
+  uint8_t val = cpu_stack_pop_byte ();
+  cpu_flag_set_if ('B', !val);
+}
+
+static inline void
+cpu_op_jsr (uint16_t target)
+{
+  uint8_t ret = (CPU.PC - 1) & MASK_SHORT;
+  cpu_stack_push_short (ret);
+  CPU.PC = target;
+}
+
+static inline void
+cpu_op_rts (void)
+{
+  uint8_t lo = cpu_stack_pop_byte ();
+  uint8_t hi = cpu_stack_pop_byte ();
+  CPU.PC = (((hi << 8) | lo) + 1) & MASK_SHORT;
+}
+
+static inline void
+cpu_op_rti (void)
+{
+  uint8_t val = cpu_stack_pop_byte ();
+  cpu_flag_set_if ('B', !val);
+  uint8_t lo = cpu_stack_pop_byte ();
+  uint8_t hi = cpu_stack_pop_byte ();
+  CPU.PC = ((hi << 8) | lo) & MASK_SHORT;
+}
+
+static inline void
+cpu_op_brk (void)
+{
+  CPU.PC++;
+  cpu_stack_push_short (CPU.PC);
+  cpu_stack_push_byte (STATUS.B & MASK_BYTE);
+  cpu_flag_set ('I');
+  CPU.PC = cpu_mem_write_short (IRQ_VECTOR_ADDR);
+}
+
+static inline void
+cpu_op_jmp (uint8_t addr)
+{
+  CPU.PC = addr & MASK_SHORT;
 }
