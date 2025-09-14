@@ -9,7 +9,7 @@
 #define MASK_BYTE 0xFF
 #define MASK_WORD 0xFFFF
 #define MASK_BCD 0x0F
-#define MASK_DIFF 0x1FF 
+#define MASK_DIFF 0x1FF
 #define MASK_COMPLEMENT 0x80
 
 #define MEM_SIZE 0x10000
@@ -59,7 +59,7 @@ typedef char flag_t;
 typedef uint8_t flag_modstat_t;
 typedef int addr_mode_t;
 
-typedef uint8_t (*u8_identity_t)(uint8_t);
+typedef uint8_t (*u8_identity_t) (uint8_t);
 
 static struct
 {
@@ -717,10 +717,10 @@ cpu_sbc_decimal (uint8_t subtrahend)
 static uint8_t
 cpu_rmw_helper (uint16_t addr, u8_identity_t op)
 {
-    uint8_t val = cpu_mem_read_byte (addr);
-    uint8_t new = op (val);
-    cpu_mem_write_byte (addr, new);
-    return new;
+  uint8_t val = cpu_mem_read_byte (addr);
+  uint8_t new = op (val);
+  cpu_mem_write_byte (addr, new);
+  return new;
 }
 
 // Comparison Helpers
@@ -728,7 +728,87 @@ cpu_rmw_helper (uint16_t addr, u8_identity_t op)
 static bool
 cpu_cmp_helper (uint8_t reg_val, uint8_t operand)
 {
-     int16_t diff = (reg_val - operand) & MASK_DIFF;
-     cpu_set_flag_if ('C', reg_val >= operand);
-     cpu_set_flag-zn ((uint8_t)(diff & MASK_BYTE));
+  int16_t diff = (reg_val - operand) & MASK_DIFF;
+  cpu_set_flag_if ('C', reg_val >= operand);
+  cpu_set_flag - zn ((uint8_t)(diff & MASK_BYTE));
+}
+
+// Micro-op helpers
+
+static inline void
+cpu_op_lda (uint8_t val)
+{
+  CPU.ACC = val & MASK_BYTE;
+  cpu_set_flag_zn (CPU.ACC);
+}
+
+static inline void
+cpu_op_ldx (uint8_t val)
+{
+  CPU.XR = val & MASK_BYTE;
+  cpu_set_flag_zn (CPU.XR);
+}
+
+static inline void
+cpu_op_ldy (uint8_t val)
+{
+  CPU.YR = val & MASK_BYTE;
+  cpu_set_flag_zn (CPU.YR);
+}
+
+static inline void
+cpu_op_sta (uint16_t addr)
+{
+  cpu_mem_write_byte (addr, CPU.ACC);
+}
+
+static inline void
+cpu_op_stx (uint16_t addr)
+{
+  cpu_mem_write_byte (addr, CPU.XR);
+}
+
+static inline void
+cpu_op_sty (uint16_t addr)
+{
+  cpu_mem_write_byte (addr, CPU.YR);
+}
+
+static inline void
+cpu_op_and (uint8_t val)
+{
+  CPU.ACC &= val & MASK_BYTE;
+  cpu_set_flag_zn (CPU.ACC);
+}
+
+static inline void
+cpu_op_ora (uint8_t val)
+{
+  CPU.ACC |= val & MASK_BYTE;
+  cpu_set_flag_zn (CPU.ACC);
+}
+
+static inline void
+cpu_op_eor (uint8_t val)
+{
+  CPU.ACC ^= val & MASK_BYTE;
+  cpu_set_flag_zn (CPU.ACC);
+}
+
+static inline void
+cpu_op_adc (uint8_t val)
+{
+  if (cpu_flag_is_set ('D'))
+    cpu_adc_decimal (val);
+  else
+    cpu_adc_binary (val);
+}
+
+static inline void
+cpu_op_sbc (uint8_t val)
+{
+  if (cpu_flag_is_set ('D'))
+    cpu_sbc_decimal (val);
+  else
+    cpu_sbc_binary (val);
 }
