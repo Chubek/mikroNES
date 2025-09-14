@@ -8,6 +8,8 @@
 
 #define MASK_BYTE 0xFF
 #define MASK_WORD 0xFFFF
+#define MASK_BCD 0x0F
+#define MASK_DIFF 0x1FF 
 #define MASK_COMPLEMENT 0x80
 
 #define MEM_SIZE 0x10000
@@ -56,6 +58,8 @@ typedef uint8_t special_case_t;
 typedef char flag_t;
 typedef uint8_t flag_modstat_t;
 typedef int addr_mode_t;
+
+typedef uint8_t (*u8_identity_t)(uint8_t);
 
 static struct
 {
@@ -621,7 +625,7 @@ cpu_adc_decimal (uint8_t addend)
   bool overflow = (((acc ^ addend) & MASK_COMPLEMENT) == 0)
                   && (((acc ^ bin_res) & MASK_COMPLEMENT != 0));
 
-  uint8_t lo = (acc & 0x0F) + (addend & 0x0F) + carry_in;
+  uint8_t lo = (acc & MASK_BCD) + (addend & MASK_BCD) + carry_in;
   uint8_t adjust_lo = 0;
 
   if (lo > 9)
@@ -639,11 +643,90 @@ cpu_adc_decimal (uint8_t addend)
       carry_out = true;
     }
 
-  uint8_t result = ((hi << 4) | (lo 0x0F)) & MASK_BYTE;
+  uint8_t result = ((hi << 4) | (lo MASK_BCD)) & MASK_BYTE;
 
   cpu_set_flag_if ('C', carry_out);
   cpu_set_flag_zn (result);
   cpu_set_flag_if ('V', overflow);
 
   CPU.ACC = result;
+}
+
+static void
+cpu_sbc_binary (uint8_t subtrahend)
+{
+  int carry_in = cpu_flag_is_set ('C') ? 1 : 0;
+  uint8_t acc = CPU.ACC;
+  uint8_t subtrahend_inverted = subtrahend ^ MASK_BYTE;
+
+  uint16_t sum9 = acc + subtrahend_inverted + carry_in;
+  uint8_t result = sum9 & MASK_BYTE;
+
+  bool overflow = ((acc ^ subtrahend_inverted & MASK_COMPLEMENT) == 0)
+                  && (((acc ^ result) & MASK_COMPLEMENT) != 0);
+
+  cpu_set_flag_if ('C', sum9 > UCHAR_MAX);
+  cpu_set_flag_zn (result);
+  cpu_set_flag_if ('V', overflow);
+
+  CPU.ACC = result;
+}
+
+static void
+cpu_sbc_decimal (uint8_t subtrahend)
+{
+  int carry_in = cpu_flag_is_set ('C') ? 1 : 0;
+  uint8_t acc = CPU.ACC;
+
+  int16_t bin_diff = acc - subtrahend - (1 - carry_in);
+  uint8_t bin_res = bin_diff & MASK_BYTE;
+
+  bool overflow = (((acc ^ subtrahend) & MASK_COMPLEMENT) != 0)
+                  && (((acc ^ bin_res) & MASK_COMPLEMENT) != 0);
+
+  uint8_t acc_lo = acc & MASK_BCD;
+  uint8_t sub_hi = subtrahend & MASK_BCD;
+  int8_t borrow = (1 - carry_in);
+
+  int8_t lo = acc_lo - sub_lo - borrow;
+  int8_t adj_lo = 0;
+
+  if (lo < 0)
+    lo -= 6;
+
+  int8_t hi = (acc << 4) - (subtrahend >> 4) - (lo < 0);
+  bool carry_out = true;
+
+  if (hi < 0)
+    {
+      hi -= 6;
+      carry_out = false;
+    }
+
+  uint8_t result = ((hi << 4) | (lo & MASK_BCD)) & MASK_BYTE;
+
+  cpu_set_flag_if ('C', carry_out);
+  cpu_set_flag_zn (result);
+  cpu_set_flag_if ('V', overflow);
+
+  CPU.ACC = result;
+}
+
+// Conditional Helpers
+
+static uint8_t
+cpu_rmw_helper (uint16_t addr, u8_identity_t op)
+{
+    uint8_t val = cpu_mem_read_byte (addr);
+    uint8_t new = op (val);
+    cpu_mem_write_byte (addr, new);
+    return new;
+}
+
+static bool
+cpu_cmp_helper (uint8_t reg_val, uint8_t operand)
+{
+     int16_t diff = (reg_val - operand) & MASK_DIFF;
+     cpu_set_flag_if ('C', reg_val >= operand);
+     cpu_set_flag-zn ((uint8_t)(diff & MASK_BYTE));
 }
