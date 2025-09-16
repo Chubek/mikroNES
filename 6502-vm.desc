@@ -1,0 +1,315 @@
+LDA!operand
+{
+  CPU.ACC = val & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+======
+LDX!operand
+{
+  CPU.XR = val & MASK_BYTE;
+  cpu_flag_set_zn (CPU.XR);
+}
+======
+LDY!operand
+{
+  CPU.YR = val & MASK_BYTE;
+  cpu_flag_set_zn (CPU.YR);
+}
+======
+STA!addr
+{
+  cpu_mem_write_byte (addr, CPU.ACC);
+}
+======
+STX!addr
+{
+  cpu_mem_write_byte (addr, CPU.XR);
+}
+======
+STY!addr
+{
+  cpu_mem_write_byte (addr, CPU.YR);
+}
+======
+AND!operand
+{
+  CPU.ACC &= val & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+======
+ORA!operand
+{
+  CPU.ACC |= val & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+======
+EOR!operand
+{
+  CPU.ACC ^= val & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+======
+ADC!operand
+{
+  if (cpu_flag_is_set ('D'))
+    cpu_helper_adc_decimal (val);
+  else
+    cpu_helper_adc_binary (val);
+}
+======
+SBC!operand
+{
+  if (cpu_flag_is_set ('D'))
+    cpu_helper_sbc_decimal (val);
+  else
+    cpu_helper_sbc_binary (val);
+}
+======
+ASL!operand
+{
+  cpu_flag_set_if ('C', (value & MASK_COMPLEMENT) != 0);
+  CPU.ACC = (val << 1) & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+======
+LSR!operand
+{
+  cpu_flag_set_if ('C', (val & MASK_LSR) != 0);
+  CPU.ACC = (val >> 1) & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+======
+ROL!operand
+{
+  int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
+  cpu_flag_set_if ('C', (val & MASK_COMPLEMENT) != 0);
+  CPU.ACC = ((val << 1) | old_flag) & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+======
+ROL!operand
+{
+  int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
+  cpu_flag_set_if ('C', (val & MASK_LSR) != 0);
+  CPU.ACC = ((val >> 1) | (old_flag << 7)) & MASK_BYTE;
+  cpu_flag_set_zn (CPU.ACC);
+}
+======
+BIT!operand
+{
+  cpu_flag_set_if ('Z', ((CPU.ACC & val) & MASK_BYTE) == 0);
+  cpu_flag_set_if ('N', (val & MASK_COMPLEMENT) != 0);
+  cpu_flag_set_if ('V', (val & MASK_BIT) != 0);
+}
+======
+INC!addr
+{
+  uint8_t new = (cpu_mem_read_byte (addr) + 1) & MASK_BYTE;
+  cpu_mem_write_byte (addr, new);
+  cpu_flag_set_zn (new);
+}
+======
+INC!addr
+{
+  uint8_t new (cpu_mem_read_byte (addr) - 1) & MASK_BYTE;
+  cpu_mem_write_byte (addr, new);
+  cpu_flag_set_zn (new);
+}
+======
+TAX!void
+{
+  CPU.XR = CPU.ACC;
+  cpu_flag_set_zn (C.XR);
+}
+======
+TAX!void
+{
+  CPU.XR = CPU.ACC;
+  cpu_flag_set_zn (C.XR);
+}
+======
+TAX!void
+{
+  CPU.XR = CPU.ACC;
+  cpu_flag_set_zn (C.XR);
+}
+======
+TAX!void
+{
+  CPU.XR = CPU.ACC;
+  cpu_flag_set_zn (C.XR);
+}
+======
+TXA!void
+{
+  CPU.ACC = CPU.XR;
+  cpu_flag_set_zn (C.ACC);
+}
+======
+TAY!void
+{
+  CPU.YR = CPU.ACC;
+  cpu_flag_set_zn (C.YR);
+}
+======
+TYA!void
+{
+  CPU.ACC = CPU.YR;
+  cpu_flag_set_zn (C.ACC);
+}
+======
+TSX!void
+{
+  CPU.XR = CPU.SP;
+  cpu_flag_set_zn (C.XR);
+}
+======
+TXS!void
+{
+  CPU.SP = CPU.XR;
+}
+======
+INX!void
+{
+  CPU.XR++;
+  cpu_flag_set_zn (C.XR);
+}
+======
+INX!void
+{
+  CPU.XR++;
+  cpu_flag_set_zn (C.XR);
+}
+======
+INY!void
+{
+  CPU.YR++;
+  cpu_flag_set_zn (C.YR);
+}
+======
+DEX!void
+{
+  CPU.XR--;
+  cpu_flag_set_zn (C.XR);
+}
+======
+DEY!void
+{
+  CPU.YR--;
+  cpu_flag_set_zn (C.YR);
+}
+======
+CMP!operand
+{
+  cpu_helper_cmp (CPU.ACC, val);
+}
+======
+CPX!operand
+{
+  cpu_helper_cmp (CPU.XR, val);
+}
+======
+CPY!operand
+{
+  cpu_helper_cmp (CPU.YR, val);
+}
+======
+CLC!void
+{
+  cpu_flag_unset ('C');
+}
+======
+SEC!void
+{
+  cpu_flag_set ('C');
+}
+======
+CLD!void
+{
+  cpu_flag_unset ('D');
+}
+======
+SED!void
+{
+  cpu_flag_set ('D');
+}
+======
+CLI!void
+{
+  cpu_flag_unset ('I');
+}
+======
+SEI!void
+{
+  cpu_flag_set ('I');
+}
+======
+CLV!void
+{
+  cpu_flag_unset ('V');
+}
+======
+NOP!void
+{
+  return;
+}
+======
+PHA!void
+{
+  cpu_stack_push_byte (CPU.ACC);
+}
+======
+PLA!void
+{
+  CPU.ACC = cpu_stack_pop_byte ();
+}
+======
+PHP!void
+{
+  cpu_stack_push_byte (STATUS.B & MASK_BYTE);
+  STATUS.X = 1;
+}
+======
+PLP!void
+{
+  uint8_t val = cpu_stack_pop_byte ();
+  cpu_flag_set_if ('B', !val);
+}
+======
+JSR!addr
+{
+  uint8_t ret = (CPU.PC - 1) & MASK_SHORT;
+  cpu_stack_push_short (ret);
+  CPU.PC = addr;
+}
+======
+RTS!void
+{
+  uint8_t lo = cpu_stack_pop_byte ();
+  uint8_t hi = cpu_stack_pop_byte ();
+  CPU.PC = (((hi << 8) | lo) + 1) & MASK_SHORT;
+}
+======
+RTI!void
+{
+  uint8_t val = cpu_stack_pop_byte ();
+  cpu_flag_set_if ('B', !val);
+  uint8_t lo = cpu_stack_pop_byte ();
+  uint8_t hi = cpu_stack_pop_byte ();
+  CPU.PC = ((hi << 8) | lo) & MASK_SHORT;
+}
+======
+BRK!void
+{
+  CPU.PC++;
+  cpu_stack_push_short (CPU.PC);
+  cpu_stack_push_byte (STATUS.B & MASK_BYTE);
+  cpu_flag_set ('I');
+  CPU.PC = cpu_mem_write_short (VECADDR_IRQ);
+}
+======
+JMP (uint8_t addr)
+{
+  CPU.PC = addr & MASK_SHORT;
+}
+
