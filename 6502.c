@@ -77,6 +77,7 @@ static struct
   bool running;
 
   bool pending_NMI;
+  bool pending_RES;
   bool pending_IRQ;
 } CPU;
 
@@ -767,6 +768,17 @@ cpu_handle_nmi (void)
   cpu_stack_push_byte (GET_BITFIELD_JOINED (STATUS));
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_NMI);
+  CPU.total_cycles += 7;
+}
+
+static void
+cpu_handle_res (void)
+{
+  if (!CPU.pending_RES)
+    return;
+
+  CPU.pending_RES = false;
+  CPU.PC = cpu_mem_read_word (VECADDR_RES);
   CPU.total_cycles += 7;
 }
 
