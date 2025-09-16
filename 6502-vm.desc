@@ -1,18 +1,18 @@
 LDA!byte
 {
-  CPU.ACC = val & MASK_BYTE;
+  CPU.ACC = OPERAND.byte & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
 LDX!byte
 {
-  CPU.XR = val & MASK_BYTE;
+  CPU.XR = OPERAND.byte & MASK_BYTE;
   cpu_flag_set_zn (CPU.XR);
 }
 ======
 LDY!byte
 {
-  CPU.YR = val & MASK_BYTE;
+  CPU.YR = OPERAND.byte & MASK_BYTE;
   cpu_flag_set_zn (CPU.YR);
 }
 ======
@@ -33,73 +33,73 @@ STY!addr
 ======
 AND!byte
 {
-  CPU.ACC &= val & MASK_BYTE;
+  CPU.ACC &= OPERAND.byte & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
 ORA!byte
 {
-  CPU.ACC |= val & MASK_BYTE;
+  CPU.ACC |= OPERAND.byte & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
 EOR!byte
 {
-  CPU.ACC ^= val & MASK_BYTE;
+  CPU.ACC ^= OPERAND.byte & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
 ADC!byte
 {
   if (cpu_flag_is_set ('D'))
-    cpu_helper_adc_decimal (val);
+    cpu_helper_adc_decimal (OPERAND.byte);
   else
-    cpu_helper_adc_binary (val);
+    cpu_helper_adc_binary (OPERAND.byte);
 }
 ======
 SBC!byte
 {
   if (cpu_flag_is_set ('D'))
-    cpu_helper_sbc_decimal (val);
+    cpu_helper_sbc_decimal (OPERAND.byte);
   else
-    cpu_helper_sbc_binary (val);
+    cpu_helper_sbc_binary (OPERAND.byte);
 }
 ======
 ASL!byte
 {
-  cpu_flag_set_if ('C', (value & MASK_COMPLEMENT) != 0);
-  CPU.ACC = (val << 1) & MASK_BYTE;
+  cpu_flag_set_if ('C', (OPERAND.byte & MASK_COMPLEMENT) != 0);
+  CPU.ACC = (OPERAND.byte << 1) & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
 LSR!byte
 {
-  cpu_flag_set_if ('C', (val & MASK_LSR) != 0);
-  CPU.ACC = (val >> 1) & MASK_BYTE;
+  cpu_flag_set_if ('C', (OPERAND.byte & MASK_LSR) != 0);
+  CPU.ACC = (OPERAND.byte >> 1) & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
 ROL!byte
 {
   int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
-  cpu_flag_set_if ('C', (val & MASK_COMPLEMENT) != 0);
-  CPU.ACC = ((val << 1) | old_flag) & MASK_BYTE;
+  cpu_flag_set_if ('C', (OPERAND.byte & MASK_COMPLEMENT) != 0);
+  CPU.ACC = ((OPERAND.byte << 1) | old_flag) & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
 ROL!byte
 {
   int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
-  cpu_flag_set_if ('C', (val & MASK_LSR) != 0);
-  CPU.ACC = ((val >> 1) | (old_flag << 7)) & MASK_BYTE;
+  cpu_flag_set_if ('C', (OPERAND.byte & MASK_LSR) != 0);
+  CPU.ACC = ((OPERAND.byte >> 1) | (old_flag << 7)) & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
 BIT!byte
 {
-  cpu_flag_set_if ('Z', ((CPU.ACC & val) & MASK_BYTE) == 0);
-  cpu_flag_set_if ('N', (val & MASK_COMPLEMENT) != 0);
-  cpu_flag_set_if ('V', (val & MASK_BIT) != 0);
+  cpu_flag_set_if ('Z', ((CPU.ACC & OPERAND.byte) & MASK_BYTE) == 0);
+  cpu_flag_set_if ('N', (OPERAND.byte & MASK_COMPLEMENT) != 0);
+  cpu_flag_set_if ('V', (OPERAND.byte & MASK_BIT) != 0);
 }
 ======
 INC!addr
@@ -201,17 +201,17 @@ DEY!void
 ======
 CMP!byte
 {
-  cpu_helper_cmp (CPU.ACC, val);
+  cpu_helper_cmp (CPU.ACC, OPERAND.byte);
 }
 ======
 CPX!byte
 {
-  cpu_helper_cmp (CPU.XR, val);
+  cpu_helper_cmp (CPU.XR, OPERAND.byte);
 }
 ======
 CPY!byte
 {
-  cpu_helper_cmp (CPU.YR, val);
+  cpu_helper_cmp (CPU.YR, OPERAND.byte);
 }
 ======
 CLC!void
@@ -272,8 +272,8 @@ PHP!void
 ======
 PLP!void
 {
-  uint8_t val = cpu_stack_pop_byte ();
-  cpu_flag_set_if ('B', !val);
+  uint8_t OPERAND.byte = cpu_stack_pop_byte ();
+  cpu_flag_set_if ('B', !OPERAND.byte);
 }
 ======
 JSR!addr
@@ -292,8 +292,8 @@ RTS!void
 ======
 RTI!void
 {
-  uint8_t val = cpu_stack_pop_byte ();
-  cpu_flag_set_if ('B', !val);
+  uint8_t OPERAND.byte = cpu_stack_pop_byte ();
+  cpu_flag_set_if ('B', !OPERAND.byte);
   uint8_t lo = cpu_stack_pop_byte ();
   uint8_t hi = cpu_stack_pop_byte ();
   CPU.PC = ((hi << 8) | lo) & MASK_SHORT;
