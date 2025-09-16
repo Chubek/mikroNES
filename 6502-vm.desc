@@ -1,16 +1,16 @@
-LDA!operand
+LDA!byte
 {
   CPU.ACC = val & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
-LDX!operand
+LDX!byte
 {
   CPU.XR = val & MASK_BYTE;
   cpu_flag_set_zn (CPU.XR);
 }
 ======
-LDY!operand
+LDY!byte
 {
   CPU.YR = val & MASK_BYTE;
   cpu_flag_set_zn (CPU.YR);
@@ -31,25 +31,25 @@ STY!addr
   cpu_mem_write_byte (addr, CPU.YR);
 }
 ======
-AND!operand
+AND!byte
 {
   CPU.ACC &= val & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
-ORA!operand
+ORA!byte
 {
   CPU.ACC |= val & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
-EOR!operand
+EOR!byte
 {
   CPU.ACC ^= val & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
-ADC!operand
+ADC!byte
 {
   if (cpu_flag_is_set ('D'))
     cpu_helper_adc_decimal (val);
@@ -57,7 +57,7 @@ ADC!operand
     cpu_helper_adc_binary (val);
 }
 ======
-SBC!operand
+SBC!byte
 {
   if (cpu_flag_is_set ('D'))
     cpu_helper_sbc_decimal (val);
@@ -65,21 +65,21 @@ SBC!operand
     cpu_helper_sbc_binary (val);
 }
 ======
-ASL!operand
+ASL!byte
 {
   cpu_flag_set_if ('C', (value & MASK_COMPLEMENT) != 0);
   CPU.ACC = (val << 1) & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
-LSR!operand
+LSR!byte
 {
   cpu_flag_set_if ('C', (val & MASK_LSR) != 0);
   CPU.ACC = (val >> 1) & MASK_BYTE;
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
-ROL!operand
+ROL!byte
 {
   int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
   cpu_flag_set_if ('C', (val & MASK_COMPLEMENT) != 0);
@@ -87,7 +87,7 @@ ROL!operand
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
-ROL!operand
+ROL!byte
 {
   int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
   cpu_flag_set_if ('C', (val & MASK_LSR) != 0);
@@ -95,7 +95,7 @@ ROL!operand
   cpu_flag_set_zn (CPU.ACC);
 }
 ======
-BIT!operand
+BIT!byte
 {
   cpu_flag_set_if ('Z', ((CPU.ACC & val) & MASK_BYTE) == 0);
   cpu_flag_set_if ('N', (val & MASK_COMPLEMENT) != 0);
@@ -199,17 +199,17 @@ DEY!void
   cpu_flag_set_zn (C.YR);
 }
 ======
-CMP!operand
+CMP!byte
 {
   cpu_helper_cmp (CPU.ACC, val);
 }
 ======
-CPX!operand
+CPX!byte
 {
   cpu_helper_cmp (CPU.XR, val);
 }
 ======
-CPY!operand
+CPY!byte
 {
   cpu_helper_cmp (CPU.YR, val);
 }
