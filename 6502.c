@@ -55,6 +55,7 @@
 #define SPECIALCASE_BRANCH_CROSS 2
 
 #define GET_PAGE (addr) ((addr >> 8) & MASK_BYTE)
+#define GET_BITFIELD_JOINED (bf) (*((uint8_t*)&bf))
 
 typedef uint8_t special_case_t;
 typedef char flag_t;
@@ -756,7 +757,7 @@ cpu_handle_nmi (void)
 
   CPU.pending_NMI = false;
   cpu_stack_push_word (CPU.PC);
-  cpu_stack_push_byte (STATUS.B);
+  cpu_stack_push_byte (GET_BITFIELD_JOINED (STATUS));
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_NMI);
   CPU.total_cycles += 7;
@@ -770,7 +771,7 @@ cpu_handle_irq (void)
 
   CPU.pending_IRQ = false;
   cpu_stack_push_word (CPU.PC);
-  cpu_stack_push_byte (STATUS.B);
+  cpu_stack_push_byte (GET_BITFIELD_JOINED (STATUS));
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_IRQ);
   CPU.total_cycles += 7;
