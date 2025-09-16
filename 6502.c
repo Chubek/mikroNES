@@ -55,8 +55,8 @@
 #define SPECIALCASE_BRANCH_CROSS 2
 
 #define GET_PAGE (addr) ((addr >> 8) & MASK_BYTE)
-#define GET_BITFIELD_JOINED (bf) (*((uint8_t*)&bf))
-#define SET_BITFIELD_FROMUM (bf, num) (*((uint8_t*)&bf) = num)
+#define GET_BITFIELD_JOINED (bf) (*((uint8_t *)&bf))
+#define SET_BITFIELD_FROMUM (bf, num) (*((uint8_t *)&bf) = num)
 
 typedef uint8_t special_case_t;
 typedef char flag_t;
@@ -115,6 +115,12 @@ static struct
   flag_modstat_t action_D;
   flag_modstat_t action_V;
 } INSTR;
+
+static struct
+{
+  uint8_t byte;
+  uint16_t word;
+} OPERAND;
 
 static struct
 {
