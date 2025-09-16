@@ -56,6 +56,7 @@
 
 #define GET_PAGE (addr) ((addr >> 8) & MASK_BYTE)
 #define GET_BITFIELD_JOINED (bf) (*((uint8_t*)&bf))
+#define SET_BITFIELD_FROMUM (bf, num) (*((uint8_t*)&bf) = num)
 
 typedef uint8_t special_case_t;
 typedef char flag_t;
