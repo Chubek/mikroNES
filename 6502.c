@@ -1117,7 +1117,7 @@ cpu_op_jmp (uint8_t addr)
 
 // Handle Interrups
 
-static uint8_t
+static void
 cpu_handle_nmi (void)
 {
   if (!CPU.pending_NMI)
@@ -1131,7 +1131,7 @@ cpu_handle_nmi (void)
   CPU.total_cycles += 7;
 }
 
-static uint8_t
+static void
 cpu_handle_irq (void)
 {
   if (!CPU.pending_IRQ)
