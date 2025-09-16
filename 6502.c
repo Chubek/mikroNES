@@ -714,7 +714,7 @@ cpu_helper_sbc_decimal (uint8_t subtrahend)
   CPU.ACC = result;
 }
 
-// Read-Modify-Write Helpers
+// Execution Helpers
 
 static uint8_t
 cpu_helper_rmw (uint16_t addr, u8_identity_t op)
@@ -725,14 +725,25 @@ cpu_helper_rmw (uint16_t addr, u8_identity_t op)
   return new;
 }
 
-// Comparison Helpers
-
 static bool
 cpu_helper_cmp (uint8_t reg_val, uint8_t operand)
 {
   int16_t diff = (reg_val - operand) & MASK_DIFF;
   cpu_flag_set_if ('C', reg_val >= operand);
   cpu_flag_set - zn ((uint8_t)(diff & MASK_BYTE));
+}
+
+static uint8_t
+cpu_helper_branch (bool cond, uint16_t target)
+{
+  if (!cond)
+    return 0;
+  MEMORY.base_page = GET_PAGE (CPU.PC);
+  CPU.PC = target;
+  if (GET_PAGE (target) != MEMORY.base_page)
+    return 2;
+  else
+    return 1;
 }
 
 // Micro-op helpers
