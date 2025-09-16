@@ -21,9 +21,9 @@
 #define STACK_END 0x01FF
 #define PAGE_SIZE 0xFF
 
-#define NMI_VECTOR_ADDR 0xFFFA
-#define RES_VECTOR_ADDR 0xFFFC
-#define IRQ_VECTOR_ADDR 0xFFFE
+#define VECADDR_NMI 0xFFFA
+#define VECADDR_RES 0xFFFC
+#define VECADDR_IRQ 0xFFFE
 
 #define FLAG_SET 1
 #define FLAG_UNSET 0
@@ -71,11 +71,11 @@ static struct
   uint8_t SP;
   uint16_t PC;
 
-  uint64_t cycles;
+  uint64_t total_cycles;
   bool running;
 
-  bool pending_nmi;
-  bool pending_irq;
+  bool pending_NMI;
+  bool pending_IRQ;
 } CPU;
 
 static struct
@@ -1106,11 +1106,41 @@ cpu_op_brk (void)
   cpu_stack_push_short (CPU.PC);
   cpu_stack_push_byte (STATUS.B & MASK_BYTE);
   cpu_flag_set ('I');
-  CPU.PC = cpu_mem_write_short (IRQ_VECTOR_ADDR);
+  CPU.PC = cpu_mem_write_short (VECADDR_IRQ);
 }
 
 static inline void
 cpu_op_jmp (uint8_t addr)
 {
   CPU.PC = addr & MASK_SHORT;
+}
+
+// Handle Interrups
+
+static uint8_t
+cpu_handle_nmi (void)
+{
+  if (!CPU.pending_NMI)
+    return;
+
+  CPU.pending_NMI = false;
+  cpu_stack_push_word (CPU.PC);
+  cpu_stack_push_byte (STATUS.B);
+  cpu_flag_set ('I');
+  CPU.PC = cpu_mem_read_word (VECADDR_NMI);
+  CPU.total_cycles += 7;
+}
+
+static uint8_t
+cpu_handle_irq (void)
+{
+  if (!CPU.pending_IRQ)
+    return;
+
+  CPU.pending_IRQ = false;
+  cpu_stack_push_word (CPU.PC);
+  cpu_stack_push_byte (STATUS.B);
+  cpu_flag_set ('I');
+  CPU.PC = cpu_mem_read_word (VECADDR_IRQ);
+  CPU.total_cycles += 7;
 }
