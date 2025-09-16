@@ -16,19 +16,19 @@ LDY!byte
   cpu_flag_set_zn (CPU.YR);
 }
 ======
-STA!addr
+STA!word
 {
-  cpu_mem_write_byte (addr, CPU.ACC);
+  cpu_mem_write_byte (OPERAND.word, CPU.ACC);
 }
 ======
-STX!addr
+STX!word
 {
-  cpu_mem_write_byte (addr, CPU.XR);
+  cpu_mem_write_byte (OPERAND.word, CPU.XR);
 }
 ======
-STY!addr
+STY!word
 {
-  cpu_mem_write_byte (addr, CPU.YR);
+  cpu_mem_write_byte (OPERAND.word, CPU.YR);
 }
 ======
 AND!byte
@@ -102,17 +102,17 @@ BIT!byte
   cpu_flag_set_if ('V', (OPERAND.byte & MASK_BIT) != 0);
 }
 ======
-INC!addr
+INC!word
 {
-  uint8_t new = (cpu_mem_read_byte (addr) + 1) & MASK_BYTE;
-  cpu_mem_write_byte (addr, new);
+  uint8_t new = (cpu_mem_read_byte (OPERAND.word) + 1) & MASK_BYTE;
+  cpu_mem_write_byte (OPERAND.word, new);
   cpu_flag_set_zn (new);
 }
 ======
-INC!addr
+INC!word
 {
-  uint8_t new (cpu_mem_read_byte (addr) - 1) & MASK_BYTE;
-  cpu_mem_write_byte (addr, new);
+  uint8_t new (cpu_mem_read_byte (OPERAND.word) - 1) & MASK_BYTE;
+  cpu_mem_write_byte (OPERAND.word, new);
   cpu_flag_set_zn (new);
 }
 ======
@@ -272,15 +272,15 @@ PHP!void
 ======
 PLP!void
 {
-  uint8_t OPERAND.byte = cpu_stack_pop_byte ();
-  cpu_flag_set_if ('B', !OPERAND.byte);
+  uint8_t byte = cpu_stack_pop_byte ();
+  SET_BITFIELD_FROMNUM (STATUS, byte);
 }
 ======
-JSR!addr
+JSR!word
 {
   uint8_t ret = (CPU.PC - 1) & MASK_SHORT;
   cpu_stack_push_short (ret);
-  CPU.PC = addr;
+  CPU.PC = OPERAND.word;
 }
 ======
 RTS!void
@@ -292,8 +292,8 @@ RTS!void
 ======
 RTI!void
 {
-  uint8_t OPERAND.byte = cpu_stack_pop_byte ();
-  cpu_flag_set_if ('B', !OPERAND.byte);
+  uint8_t byte = cpu_stack_pop_byte ();
+  SET_BITFIELD_FROMNUM (STATUS, byte);
   uint8_t lo = cpu_stack_pop_byte ();
   uint8_t hi = cpu_stack_pop_byte ();
   CPU.PC = ((hi << 8) | lo) & MASK_SHORT;
@@ -303,13 +303,13 @@ BRK!void
 {
   CPU.PC++;
   cpu_stack_push_short (CPU.PC);
-  cpu_stack_push_byte (STATUS.B & MASK_BYTE);
+  cpu_stack_push_byte (GET_BITFIELD_JOINED (STATUS));
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_write_short (VECADDR_IRQ);
 }
 ======
-JMP (uint8_t addr)
+JMP!word
 {
-  CPU.PC = addr & MASK_SHORT;
+  CPU.PC = OPERAND.word & MASK_SHORT;
 }
 
