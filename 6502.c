@@ -778,8 +778,10 @@ cpu_handle_res (void)
     return;
 
   CPU.pending_RES = false;
+  cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_RES);
   CPU.total_cycles += 7;
+  CPU.SP -= 3;
 }
 
 static void
