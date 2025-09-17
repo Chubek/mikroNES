@@ -22,7 +22,7 @@
 #define MASK_COMPLEMENT 0x80
 
 #define VECADDR_NMI 0xFFFA
-#define VECADDR_RES 0xFFFC
+#define VECADDR_RESET 0xFFFC
 #define VECADDR_IRQ 0xFFFE
 
 #define FLAG_SET 1
@@ -55,7 +55,7 @@
 #define SPECIALCASE_BRANCH_CROSS 2
 
 #define GET_PAGE (addr) ((addr >> 8) & MASK_BYTE)
-#define GET_BITFIELD_JOINED (bf) (*((uint8_t *)&bf))
+#define GET_BITFIELD_MERGED (bf) (*((uint8_t *)&bf))
 #define SET_BITFIELD_FROMUM (bf, num) (*((uint8_t *)&bf) = num)
 
 typedef uint8_t special_case_t;
@@ -79,7 +79,7 @@ static struct
   bool running;
 
   bool pending_NMI;
-  bool pending_RES;
+  bool pending_RESET;
   bool pending_IRQ;
 } CPU;
 
@@ -262,6 +262,9 @@ cpu_flag_toggle (flag_t flag)
     case 'D':
       STATUS.D = !STATUS.D;
       return STATUS.D;
+    case 'X':
+      STATUS.X = !STATUS.X;
+      return STATUS.X;
     case 'I':
       STATUS.I = !STATUS.I;
       return STATIS.I;
@@ -291,6 +294,8 @@ cpu_flag_is_set (flag_t flag)
       return STATUS.B == FLAG_SET;
     case 'D':
       return STATUS.D == FLAG_SET;
+    case 'X':
+      return STATUS.X == FLAG_SET;
     case 'I':
       return STATIS.I == FLAG_SET;
     case 'Z':
@@ -320,6 +325,9 @@ cpu_flag_set (flag_t flag)
       return;
     case 'D':
       STATUS.D = FLAG_SET;
+      return;
+    case 'X':
+      STATUS.X = FLAG_SET;
       return;
     case 'I':
       STATIS.I = FLAG_SET;
@@ -352,6 +360,9 @@ cpu_flag_unset (flag_t flag)
     case 'D':
       STATUS.D = FLAG_UNSET;
       return;
+    case 'X':
+      STATUS.X = FLAG_UNSET;
+      return;
     case 'I':
       STATIS.I = FLAG_UNSET;
       return;
@@ -367,16 +378,16 @@ cpu_flag_unset (flag_t flag)
 }
 
 static inline void
-cpu_flag_set_if (flag_t flag, bool sw)
+cpu_flag_set_if (flag_t flag, bool cond)
 {
-  if (sw)
+  if (cond)
     cpu_flag_set (flag);
   else
     cpu_flag_unset (flag);
 }
 
 static inline void
-cpu_flag_set_zn (uint8_t value)
+cpu_flag_toggle_zn (uint8_t value)
 {
   if (value & MASK_BYTE == 0)
     cpu_flag_set ('Z');
@@ -389,84 +400,88 @@ cpu_flag_set_zn (uint8_t value)
     cpu_flag_unset ('N');
 }
 
-// Memory-at-PC read helpers
+// Address Resolvers
 
 static inline uint8_t
-cpu_mem_read_byte_from_at_pc (void)
+cpu_resvladdr_byte_pc (void)
 {
   uint16_t base = CPU.PC;
   CPU.PC += 1;
+  MEMORY.base_page = GET_PAGE (base);
   return cpu_mem_read_byte (base);
 }
 
 static inline uint8_t
-cpu_mem_read_word_from_at_pc (void)
+cpu_resvladdr_word_pc (void)
 {
   uint16_t base = CPU.PC;
   CPU.PC += 2;
+  MEMORY.base_page = GET_PAGE (base);
   return cpu_mem_read_word (base);
 }
 
 static inline uint8_t
-cpu_mem_read_byte_from_at_pc_xoffs (void)
+cpu_resvladdr_byte_pc_xoffs (void)
 {
-  uint16_t base = cpu_mem_read_byte_from_at_pc ();
+  uint16_t base = cpu_resvladdr_byte_pc ();
+  MEMORY.base_page = GET_PAGE (base);
   return base + CPU.XR;
 }
 
 static inline uint8_t
-cpu_mem_read_byte_from_at_pc_yoffs (void)
+cpu_resvladdr_byte_pc_yoffs (void)
 {
-  uint16_t base = cpu_mem_read_byte_from_at_pc ();
+  uint16_t base = cpu_resvladdr_byte_pc ();
+  MEMORY.base_page = GET_PAGE (base);
   return base + CPU.YR;
 }
 
 static inline uint16_t
-cpu_mem_read_word_from_at_pc_xoffs (void)
+cpu_resvladdr_word_pc_xoffs (void)
 {
-  uint16_t base = cpu_mem_read_word_from_at_pc ();
+  uint16_t base = cpu_resvladdr_word_pc ();
   MEMORY.base_page = GET_PAGE (base);
   return base + CPU.XR;
 }
 
 static inline uint16_t
-cpu_mem_read_word_from_at_pc_yoffs (void)
+cpu_resvladdr_word_pc_yoffs (void)
 {
-  uint16_t base = cpu_mem_read_word_from_at_pc ();
+  uint16_t base = cpu_resvladdr_word_pc ();
   MEMORY.base_page = GET_PAGE (base);
   return base + CPU.YR;
 }
 
 static inline uint16_t
-cpu_mem_read_word_from_at_pc_indir (void)
+cpu_resvladdr_word_pc_indir (void)
 {
-  uint16_t ptr = cpu_mem_read_word_from_at_pc ();
+  uint16_t ptr = cpu_resvladdr_word_pc ();
   uint8_t lo = cpu_mem_read_byte (ptr);
   uint8_t hi = cpu_mem_read_byte (ptr & 0xFF00 | ((ptr + 1) & 0x00FF));
   return ((hi << 8) | lo);
 }
 
 static inline uint16_t
-cpu_mem_read_word_from_at_pc_indir_xoffs (void)
+cpu_resvladdr_word_pc_indir_xoffs (void)
 {
-  uint8_t zp = cpu_mem_read_byte_from_at_pc ();
+  uint8_t zp = cpu_resvladdr_byte_pc ();
   uint8_t ptr = zp + CPU.XR;
   return cpu_zpg_read_word (ptr);
 }
 
 static inline uint16_t
-cpu_mem_read_word_from_at_pc_indir_offsy (void)
+cpu_resvladdr_word_pc_indir_offsy (void)
 {
-  uint8_t zp = cpu_mem_read_byte_from_at_pc ();
+  uint8_t zp = cpu_resvladdr_byte_pc ();
   uint16_t base = cpu_zpg_read_word (zp);
   MEMORY.base_page = GET_PAGE (base);
   return base + CPU.YR;
 }
 
 static inline uint16_t
-cpu_mem_read_word_from_at_pc_rel (void)
+cpu_resvladdr_word_pc_rel (void)
 {
-  uint8_t off8 = cpu_mem_read_byte_from_at_pc ();
+  uint8_t off8 = cpu_resvladdr_byte_pc ();
   int8_t signd = (off8 >= 0x80) ? (off8 - 256) : (int8_t)off8;
   uint16_t target = CPU.PC + signd;
   return target;
@@ -505,7 +520,7 @@ static void
 cpu_addrmode_zpg (void)
 {
   ADDR.mode = ADDRMODE_ZPG;
-  ADDR.eff_addr = cpu_mem_read_byte_from_at_pc ();
+  ADDR.eff_addr = cpu_resvladdr_byte_pc ();
   ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
@@ -514,7 +529,7 @@ static void
 cpu_addrmode_zpgx (void)
 {
   ADDR.mode = ADDRMODE_ZPGX;
-  ADDR.eff_addr = cpu_mem_read_byte_from_at_pc_xoffs ();
+  ADDR.eff_addr = cpu_resvladdr_byte_pc_xoffs ();
   ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
@@ -523,7 +538,7 @@ static void
 cpu_addrmode_zpgy (void)
 {
   ADDR.mode = ADDRMODE_ZPGY;
-  ADDR.eff_addr = cpu_mem_read_byte_from_at_pc_yoffs ();
+  ADDR.eff_addr = cpu_resvladdr_byte_pc_yoffs ();
   ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
@@ -532,7 +547,7 @@ static void
 cpu_addrmode_abs (void)
 {
   ADDR.mode = ADDRMODE_ABS;
-  ADDR.eff_addr = cpu_mem_read_word_from_at_pc ();
+  ADDR.eff_addr = cpu_resvladdr_word_pc ();
   ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
@@ -541,7 +556,7 @@ static void
 cpu_addrmode_absx (void)
 {
   ADDR.mode = ADDRMODE_ABSX;
-  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_xoffs ();
+  ADDR.eff_addr = cpu_resvladdr_word_pc_xoffs ();
   ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = MEMORY.base_page != get_page (ADDR.eff_addr);
 }
@@ -550,7 +565,7 @@ static void
 cpu_addrmode_absy (void)
 {
   ADDR.mode = ADDRMODE_ABSY;
-  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_yoffs ();
+  ADDR.eff_addr = cpu_resvladdr_word_pc_yoffs ();
   ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = memory.base_page != get_page (ADDR.eff_addr);
 }
@@ -559,7 +574,7 @@ static void
 cpu_addrmode_ind (void)
 {
   ADDR.mode = ADDRMODE_IND;
-  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_indir ();
+  ADDR.eff_addr = cpu_resvladdr_word_pc_indir ();
   ADDR.fetched = 0;
   ADDR.page_crossed = false;
 }
@@ -568,7 +583,7 @@ static void
 cpu_addrmode_indx (void)
 {
   ADDR.mode = ADDRMODE_XIND;
-  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_indir_xoffs ();
+  ADDR.eff_addr = cpu_resvladdr_word_pc_indir_xoffs ();
   ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = false;
 }
@@ -577,7 +592,7 @@ static void
 cpu_addrmode_yind (void)
 {
   ADDR.mode = ADDRMODE_INDY;
-  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_indir_offsy ();
+  ADDR.eff_addr = cpu_resvladdr_word_pc_indir_offsy ();
   ADDR.fetched = cpu_mem_read_byte (ADDR.eff_addr);
   ADDR.page_crossed = MEMORY.base_page != GET_PAGE (ADDR.eff_addr);
 }
@@ -586,7 +601,7 @@ static void
 cpu_addrmode_rel (void)
 {
   ADDR.mode = ADDRMODE_REL;
-  ADDR.eff_addr = cpu_mem_read_word_from_at_pc_rel ();
+  ADDR.eff_addr = cpu_resvladdr_word_pc_rel ();
   ADDR.fetched = 0;
   ADDR.page_crossed = false;
 }
@@ -605,8 +620,8 @@ cpu_helper_adc_binary (uint8_t addend)
                    && (((acc ^ result) ^ MASK_COMPLMENT)) != 0);
 
   cpu_flag_set_if ('C', sum9 > UCHAR_MAX);
-  cpu_flag_set_zn (result);
   cpu_flag_set_if ('V', overflow);
+  cpu_flag_toggle_zn (result);
 
   CPU.ACC = result;
 }
@@ -644,8 +659,8 @@ cpu_helper_adc_decimal (uint8_t addend)
   uint8_t result = ((hi << 4) | (lo MASK_BCD)) & MASK_BYTE;
 
   cpu_flag_set_if ('C', carry_out);
-  cpu_flag_set_zn (result);
   cpu_flag_set_if ('V', overflow);
+  cpu_flag_toggle_zn (result);
 
   CPU.ACC = result;
 }
@@ -664,8 +679,8 @@ cpu_helper_sbc_binary (uint8_t subtrahend)
                   && (((acc ^ result) & MASK_COMPLEMENT) != 0);
 
   cpu_flag_set_if ('C', sum9 > UCHAR_MAX);
-  cpu_flag_set_zn (result);
   cpu_flag_set_if ('V', overflow);
+  cpu_flag_toggle_zn (result);
 
   CPU.ACC = result;
 }
@@ -704,8 +719,8 @@ cpu_helper_sbc_decimal (uint8_t subtrahend)
   uint8_t result = ((hi << 4) | (lo & MASK_BCD)) & MASK_BYTE;
 
   cpu_flag_set_if ('C', carry_out);
-  cpu_flag_set_zn (result);
   cpu_flag_set_if ('V', overflow);
+  cpu_flag_toggle_zn (result);
 
   CPU.ACC = result;
 }
@@ -726,7 +741,7 @@ cpu_helper_cmp (uint8_t reg_val, uint8_t operand)
 {
   int16_t diff = (reg_val - operand) & MASK_DIFF;
   cpu_flag_set_if ('C', reg_val >= operand);
-  cpu_flag_set - zn ((uint8_t)(diff & MASK_BYTE));
+  cpu_flag_toggle_zn ((uint8_t)(diff & MASK_BYTE));
 }
 
 static uint8_t
@@ -752,21 +767,21 @@ cpu_handle_nmi (void)
 
   CPU.pending_NMI = false;
   cpu_stack_push_word (CPU.PC);
-  cpu_stack_push_byte (GET_BITFIELD_JOINED (STATUS));
+  cpu_stack_push_byte (GET_BITFIELD_MERGED (STATUS));
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_NMI);
   CPU.total_cycles += 7;
 }
 
 static void
-cpu_handle_res (void)
+cpu_handle_reset (void)
 {
-  if (!CPU.pending_RES)
+  if (!CPU.pending_RESET)
     return;
 
-  CPU.pending_RES = false;
+  CPU.pending_RESET = false;
   cpu_flag_set ('I');
-  CPU.PC = cpu_mem_read_word (VECADDR_RES);
+  CPU.PC = cpu_mem_read_word (VECADDR_RESET);
   CPU.total_cycles += 7;
   CPU.SP -= 3;
 }
@@ -779,7 +794,7 @@ cpu_handle_irq (void)
 
   CPU.pending_IRQ = false;
   cpu_stack_push_word (CPU.PC);
-  cpu_stack_push_byte (GET_BITFIELD_JOINED (STATUS));
+  cpu_stack_push_byte (GET_BITFIELD_MERGED (STATUS));
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_IRQ);
   CPU.total_cycles += 7;
