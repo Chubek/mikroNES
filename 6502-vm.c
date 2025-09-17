@@ -497,7 +497,7 @@ cpu_addrmode_imm (void)
 {
   addr.mode = ADDRMODE_IMM;
   addr.eff_addr = 0;
-  addr.fetched = cpu_mem_read_byte (cpu.pc++);
+  addr.fetched = cpu_mem_read_byte (CPU.PC++);
   addr.page_crossed = false;
 }
 
