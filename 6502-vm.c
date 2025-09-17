@@ -514,6 +514,18 @@ cpu_status_restore_pc (void)
   CPU.PC = cpu_stack_pop_word ();
 }
 
+static inline void
+cpu_status_save_acc (void)
+{
+  cpu_stack_push_byte (PC.ACC);
+}
+
+static inline void
+cpu_status_restore_acc (void)
+{
+  PC.ACC = cpu_stack_pop_byte ();
+}
+
 // Address Mode Operations
 
 static void
