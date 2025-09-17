@@ -505,13 +505,13 @@ cpu_status_restore_flags (void)
 static inline void
 cpu_status_save_pc (void)
 {
-  cpu_stack_push_byte (CPU.PC);
+  cpu_stack_push_word (CPU.PC);
 }
 
 static inline void
 cpu_status_restore_pc (void)
 {
-  CPU.PC = cpu_stack_pop_byte ();
+  CPU.PC = cpu_stack_pop_word ();
 }
 
 // Address Mode Operations
