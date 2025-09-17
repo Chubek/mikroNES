@@ -6,6 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define MEM_SIZE 0x10000
+#define ZERO_PAGE_BEGIN 0x0
+#define ZERO_PAGE_END 0xFF
+#define STACK_START 0x0100
+#define STACK_END 0x01FF
+#define PAGE_SIZE 0xFF
+
 #define MASK_BYTE 0xFF
 #define MASK_WORD 0xFFFF
 #define MASK_BCD 0x0F
@@ -13,13 +20,6 @@
 #define MASK_LSR 0x01
 #define MASK_BIT 0x40
 #define MASK_COMPLEMENT 0x80
-
-#define MEM_SIZE 0x10000
-#define ZERO_PAGE_BEGIN 0x0
-#define ZERO_PAGE_END 0xFF
-#define STACK_START 0x0100
-#define STACK_END 0x01FF
-#define PAGE_SIZE 0xFF
 
 #define VECADDR_NMI 0xFFFA
 #define VECADDR_RES 0xFFFC
