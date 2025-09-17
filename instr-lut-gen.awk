@@ -1,5 +1,3 @@
-@include "mnemonic-slot-gen.awk"
-
 BEGIN { FS = "\t" }
 
 BEGIN {
@@ -54,10 +52,11 @@ BEGIN {
 
 function emit_case(opcode, mnemonic, addrmode, size, cycles, special, flagstat) {
     printf "\tcase %s:\n", opcode
-    printf "\t\tINSTR.mnemonic_slot = %d;\n", get_mnemonic_slot(mnemonic)
+    printf "\t\tINSTR.mnemonic = \"%s\";\n", mnemonic
     printf "\t\tINSTR.size_bytes = %s;\n", size
-    printf "\t\tINSTR.address_mode = %s;\n", map_addr_mode(addrmode)
+    printf "\t\tINSTR.resolver = %s;\n", "cpu_addrmode_" map_addr_mode(addrmode)
     printf "\t\tINSTR.num_cycles = %s;\n", cycles
+    printf "\t\tINSTR.micro_op = %s;\n", "cpu_op_" tolower(mnemonic)
     printf "\t\tINSTR.special_case = %s;\n", special
 
     for (flag in flagstat) {
@@ -69,31 +68,31 @@ function emit_case(opcode, mnemonic, addrmode, size, cycles, special, flagstat) 
 
 function map_addr_mode(mode) {
     if (mode == "immediate")
-	return "ADDRMODE_IMM"
+	return "imm"
     else if (mode == "zeropage")
-	return "ADDRMODE_ZPG"
+	return "zpg"
      else if (mode == "zeropageX")
-	return "ADDRMODE_ZPGX"
+	return "zpgx"
      else if (mode == "zeropageY")
-	return "ADDRMODE_ZPGY"
+	return "zpgy"
      else if (mode == "absolute")
-	return "ADDRMODE_ABS"
+	return "abs"
      else if (mode == "absoluteX")
-	return "ADDRMODE_ABSX"
+	return "absx"
      else if (mode == "absoluteY")
-	return "ADDRMODE_ABSY"
+	return "absy"
      else if (mode == "indirect")
-	return "ADDRMODE_IND"
+	return "ind"
      else if (mode == "indirectX")
-	return "ADDRMODE_XIND"
+	return "xind"
      else if (mode == "indirectY")
-	return "ADDRMODE_INDY"
+	return "yind"
      else if (mode == "implied")
-	return "ADDRMODE_IMPL"
+	return "impl"
      else if (mode == "relative")
-	return "ADDRMODE_REL"
+	return "rel"
      else if (mode == "accumulator")
-	return "ADDRMODE_ACC"
+	return "acc"
     else {
 	# UNREACHABLE
     }

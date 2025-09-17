@@ -65,6 +65,7 @@ typedef int addr_mode_t;
 
 typedef uint8_t (*u8_identity_t) (uint8_t);
 typedef void (*micro_op_t)(void);
+typedef void (*resolver_fn_t)(void);
 
 static struct
 {
@@ -106,9 +107,9 @@ static struct
 {
   const char *mnemonic;
   uint8_t opcode;
-  address_mode_t address_mode;
   uint8_t size_bytes;
   uint8_t added_cycles;
+  resolver_fn_t resolver_fn;
   micro_op_t micro_op;
   special_case_t special_case;
   flag_modstat_t action_N;
@@ -473,8 +474,8 @@ cpu_mem_read_word_from_at_pc_rel (void)
 
 // Address Mode Operations
 
-static inline uint16_t
-cpu_addrmode_impl (uint16_t)
+static void
+cpu_addrmode_impl (void)
 {
   ADDR.mode = ADDRMODE_IMPL;
   ADDR.eff_addr = 0;
@@ -482,7 +483,7 @@ cpu_addrmode_impl (uint16_t)
   ADDR.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_acc (void)
 {
   ADDR.mode = ADDRMODE_ACC;
@@ -491,7 +492,7 @@ cpu_addrmode_acc (void)
   ADDR.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_imm (void)
 {
   addr.mode = ADDRMODE_IMM;
@@ -500,7 +501,7 @@ cpu_addrmode_imm (void)
   addr.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_zpg (void)
 {
   ADDR.mode = ADDRMODE_ZPG;
@@ -509,7 +510,7 @@ cpu_addrmode_zpg (void)
   ADDR.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_zpgx (void)
 {
   ADDR.mode = ADDRMODE_ZPGX;
@@ -518,7 +519,7 @@ cpu_addrmode_zpgx (void)
   ADDR.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_zpgy (void)
 {
   ADDR.mode = ADDRMODE_ZPGY;
@@ -527,7 +528,7 @@ cpu_addrmode_zpgy (void)
   ADDR.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_abs (void)
 {
   ADDR.mode = ADDRMODE_ABS;
@@ -536,7 +537,7 @@ cpu_addrmode_abs (void)
   ADDR.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_absx (void)
 {
   ADDR.mode = ADDRMODE_ABSX;
@@ -545,7 +546,7 @@ cpu_addrmode_absx (void)
   ADDR.page_crossed = MEMORY.base_page != get_page (ADDR.eff_addr);
 }
 
-static inline void
+static void
 cpu_addrmode_absy (void)
 {
   ADDR.mode = ADDRMODE_ABSY;
@@ -554,7 +555,7 @@ cpu_addrmode_absy (void)
   ADDR.page_crossed = memory.base_page != get_page (ADDR.eff_addr);
 }
 
-static inline void
+static void
 cpu_addrmode_ind (void)
 {
   ADDR.mode = ADDRMODE_IND;
@@ -563,7 +564,7 @@ cpu_addrmode_ind (void)
   ADDR.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_indx (void)
 {
   ADDR.mode = ADDRMODE_XIND;
@@ -572,7 +573,7 @@ cpu_addrmode_indx (void)
   ADDR.page_crossed = false;
 }
 
-static inline void
+static void
 cpu_addrmode_yind (void)
 {
   ADDR.mode = ADDRMODE_INDY;
@@ -581,7 +582,7 @@ cpu_addrmode_yind (void)
   ADDR.page_crossed = MEMORY.base_page != GET_PAGE (ADDR.eff_addr);
 }
 
-static inline void
+static void
 cpu_addrmode_rel (void)
 {
   ADDR.mode = ADDRMODE_REL;
