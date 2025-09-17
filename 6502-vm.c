@@ -94,7 +94,7 @@ static struct
   uint8_t I : 1;
   uint8_t Z : 1;
   uint8_t C : 1;
-} STATUS;
+} FLAGS;
 
 static struct
 {
@@ -252,29 +252,29 @@ cpu_flag_toggle (flag_t flag)
   switch (flag)
     {
     case 'N':
-      STATUS.N = !STATUS.N;
-      return STATUS.N;
+      FLAGS.N = !FLAGS.N;
+      return FLAGS.N;
     case 'V':
-      STATUS.V = !STATUS.V;
-      return STATUS.V;
+      FLAGS.V = !FLAGS.V;
+      return FLAGS.V;
     case 'B':
-      STATUS.B = !STATUS.B;
-      return STATUS.B;
+      FLAGS.B = !FLAGS.B;
+      return FLAGS.B;
     case 'D':
-      STATUS.D = !STATUS.D;
-      return STATUS.D;
+      FLAGS.D = !FLAGS.D;
+      return FLAGS.D;
     case 'X':
-      STATUS.X = !STATUS.X;
-      return STATUS.X;
+      FLAGS.X = !FLAGS.X;
+      return FLAGS.X;
     case 'I':
-      STATUS.I = !STATUS.I;
+      FLAGS.I = !FLAGS.I;
       return STATIS.I;
     case 'Z':
-      STATUS.Z = !STATUS.Z;
-      return STATUS.Z;
+      FLAGS.Z = !FLAGS.Z;
+      return FLAGS.Z;
     case 'C':
-      STATUS.C = !STATUS.C;
-      return STATUS.C;
+      FLAGS.C = !FLAGS.C;
+      return FLAGS.C;
     default:
       return FLAG_ERROR;
     }
@@ -288,21 +288,21 @@ cpu_flag_is_set (flag_t flag)
   switch (flag)
     {
     case 'N':
-      return STATUS.N == FLAG_SET;
+      return FLAGS.N == FLAG_SET;
     case 'V':
-      return STATUS.V == FLAG_SET;
+      return FLAGS.V == FLAG_SET;
     case 'B':
-      return STATUS.B == FLAG_SET;
+      return FLAGS.B == FLAG_SET;
     case 'D':
-      return STATUS.D == FLAG_SET;
+      return FLAGS.D == FLAG_SET;
     case 'X':
-      return STATUS.X == FLAG_SET;
+      return FLAGS.X == FLAG_SET;
     case 'I':
       return STATIS.I == FLAG_SET;
     case 'Z':
-      return STATUS.Z == FLAG_SET;
+      return FLAGS.Z == FLAG_SET;
     case 'C':
-      return STATUS.C == FLAG_SET;
+      return FLAGS.C == FLAG_SET;
     default:
       return false;
     }
@@ -316,28 +316,28 @@ cpu_flag_set (flag_t flag)
   switch (flag)
     {
     case 'N':
-      STATUS.N = FLAG_SET;
+      FLAGS.N = FLAG_SET;
       return;
     case 'V':
-      STATUS.V = FLAG_SET;
+      FLAGS.V = FLAG_SET;
       return;
     case 'B':
-      STATUS.B = FLAG_SET;
+      FLAGS.B = FLAG_SET;
       return;
     case 'D':
-      STATUS.D = FLAG_SET;
+      FLAGS.D = FLAG_SET;
       return;
     case 'X':
-      STATUS.X = FLAG_SET;
+      FLAGS.X = FLAG_SET;
       return;
     case 'I':
       STATIS.I = FLAG_SET;
       return;
     case 'Z':
-      STATUS.Z = FLAG_SET;
+      FLAGS.Z = FLAG_SET;
       return;
     case 'C':
-      STATUS.C = FLAG_SET;
+      FLAGS.C = FLAG_SET;
       return;
     default:
       return;
@@ -350,28 +350,28 @@ cpu_flag_unset (flag_t flag)
   switch (flag)
     {
     case 'N':
-      STATUS.N = FLAG_UNSET;
+      FLAGS.N = FLAG_UNSET;
       return;
     case 'V':
-      STATUS.V = FLAG_UNSET;
+      FLAGS.V = FLAG_UNSET;
       return;
     case 'B':
-      STATUS.B = FLAG_UNSET;
+      FLAGS.B = FLAG_UNSET;
       return;
     case 'D':
-      STATUS.D = FLAG_UNSET;
+      FLAGS.D = FLAG_UNSET;
       return;
     case 'X':
-      STATUS.X = FLAG_UNSET;
+      FLAGS.X = FLAG_UNSET;
       return;
     case 'I':
       STATIS.I = FLAG_UNSET;
       return;
     case 'Z':
-      STATUS.Z = FLAG_UNSET;
+      FLAGS.Z = FLAG_UNSET;
       return;
     case 'C':
-      STATUS.C = FLAG_UNSET;
+      FLAGS.C = FLAG_UNSET;
       return;
     default:
       return;
@@ -491,15 +491,15 @@ cpu_resvladdr_word_pc_rel (void)
 // CPU Status Save/Restore Helpers
 
 static inline void
-cpu_status_save_status (void)
+cpu_status_save_flags (void)
 {
-  cpu_stack_push_byte (BITFIELD_STRUTER (STATUS));
+  cpu_stack_push_byte (BITFIELD_STRUTER (FLAGS));
 }
 
 static inline void
-cpu_status_restore_status (void)
+cpu_status_restore_flags (void)
 {
-  BITFIELD_DESTRUTER (STATUS, cpu_stack_pop_byte ());
+  BITFIELD_DESTRUTER (FLAGS, cpu_stack_pop_byte ());
 }
 
 static inline void
@@ -794,7 +794,7 @@ cpu_handle_nmi (void)
 
   CPU.pending_NMI = false;
   cpu_state_save_pc ();
-  cpu_state_save_status ();
+  cpu_state_save_flags ();
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_NMI);
   CPU.total_cycles += 7;
@@ -821,7 +821,7 @@ cpu_handle_irq (void)
 
   CPU.pending_IRQ = false;
   cpu_state_save_pc ();
-  cpu_state_save_status ();
+  cpu_state_save_flags ();
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_IRQ);
   CPU.total_cycles += 7;
