@@ -64,6 +64,7 @@ typedef uint8_t flag_modstat_t;
 typedef int addr_mode_t;
 
 typedef uint8_t (*u8_identity_t) (uint8_t);
+typedef void (*micro_op_t)(void);
 
 static struct
 {
@@ -103,11 +104,12 @@ static struct
 
 static struct
 {
+  const char *mnemonic;
   uint8_t opcode;
   address_mode_t address_mode;
   uint8_t size_bytes;
-  uint8_t mnemonic_slot;
-  uint8_t addend_cycles;
+  uint8_t added_cycles;
+  micro_op_t micro_op;
   special_case_t special_case;
   flag_modstat_t action_N;
   flag_modstat_t action_Z;
