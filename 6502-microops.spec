@@ -1,19 +1,19 @@
 LDA!byte
 {
   CPU.ACC = OPERAND.byte & MASK_BYTE;
-  cpu_flag_set_zn (CPU.ACC);
+  cpu_flag_toggle_zn (CPU.ACC);
 }
 ======
 LDX!byte
 {
   CPU.XR = OPERAND.byte & MASK_BYTE;
-  cpu_flag_set_zn (CPU.XR);
+  cpu_flag_toggle_zn (CPU.XR);
 }
 ======
 LDY!byte
 {
   CPU.YR = OPERAND.byte & MASK_BYTE;
-  cpu_flag_set_zn (CPU.YR);
+  cpu_flag_toggle_zn (CPU.YR);
 }
 ======
 STA!word
@@ -34,19 +34,19 @@ STY!word
 AND!byte
 {
   CPU.ACC &= OPERAND.byte & MASK_BYTE;
-  cpu_flag_set_zn (CPU.ACC);
+  cpu_flag_toggle_zn (CPU.ACC);
 }
 ======
 ORA!byte
 {
   CPU.ACC |= OPERAND.byte & MASK_BYTE;
-  cpu_flag_set_zn (CPU.ACC);
+  cpu_flag_toggle_zn (CPU.ACC);
 }
 ======
 EOR!byte
 {
   CPU.ACC ^= OPERAND.byte & MASK_BYTE;
-  cpu_flag_set_zn (CPU.ACC);
+  cpu_flag_toggle_zn (CPU.ACC);
 }
 ======
 ADC!byte
@@ -69,14 +69,14 @@ ASL!byte
 {
   cpu_flag_set_if ('C', (OPERAND.byte & MASK_COMPLEMENT) != 0);
   CPU.ACC = (OPERAND.byte << 1) & MASK_BYTE;
-  cpu_flag_set_zn (CPU.ACC);
+  cpu_flag_toggle_zn (CPU.ACC);
 }
 ======
 LSR!byte
 {
   cpu_flag_set_if ('C', (OPERAND.byte & MASK_LSR) != 0);
   CPU.ACC = (OPERAND.byte >> 1) & MASK_BYTE;
-  cpu_flag_set_zn (CPU.ACC);
+  cpu_flag_toggle_zn (CPU.ACC);
 }
 ======
 ROL!byte
@@ -84,7 +84,7 @@ ROL!byte
   int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
   cpu_flag_set_if ('C', (OPERAND.byte & MASK_COMPLEMENT) != 0);
   CPU.ACC = ((OPERAND.byte << 1) | old_flag) & MASK_BYTE;
-  cpu_flag_set_zn (CPU.ACC);
+  cpu_flag_toggle_zn (CPU.ACC);
 }
 ======
 ROL!byte
@@ -92,7 +92,7 @@ ROL!byte
   int old_flag = cpu_flag_is_set ('C') ? 1 : 0;
   cpu_flag_set_if ('C', (OPERAND.byte & MASK_LSR) != 0);
   CPU.ACC = ((OPERAND.byte >> 1) | (old_flag << 7)) & MASK_BYTE;
-  cpu_flag_set_zn (CPU.ACC);
+  cpu_flag_toggle_zn (CPU.ACC);
 }
 ======
 BIT!byte
@@ -106,62 +106,62 @@ INC!word
 {
   uint8_t new = (cpu_mem_read_byte (OPERAND.word) + 1) & MASK_BYTE;
   cpu_mem_write_byte (OPERAND.word, new);
-  cpu_flag_set_zn (new);
+  cpu_flag_toggle_zn (new);
 }
 ======
 INC!word
 {
   uint8_t new (cpu_mem_read_byte (OPERAND.word) - 1) & MASK_BYTE;
   cpu_mem_write_byte (OPERAND.word, new);
-  cpu_flag_set_zn (new);
+  cpu_flag_toggle_zn (new);
 }
 ======
 TAX!void
 {
   CPU.XR = CPU.ACC;
-  cpu_flag_set_zn (C.XR);
+  cpu_flag_toggle_zn (C.XR);
 }
 ======
 TAX!void
 {
   CPU.XR = CPU.ACC;
-  cpu_flag_set_zn (C.XR);
+  cpu_flag_toggle_zn (C.XR);
 }
 ======
 TAX!void
 {
   CPU.XR = CPU.ACC;
-  cpu_flag_set_zn (C.XR);
+  cpu_flag_toggle_zn (C.XR);
 }
 ======
 TAX!void
 {
   CPU.XR = CPU.ACC;
-  cpu_flag_set_zn (C.XR);
+  cpu_flag_toggle_zn (C.XR);
 }
 ======
 TXA!void
 {
   CPU.ACC = CPU.XR;
-  cpu_flag_set_zn (C.ACC);
+  cpu_flag_toggle_zn (C.ACC);
 }
 ======
 TAY!void
 {
   CPU.YR = CPU.ACC;
-  cpu_flag_set_zn (C.YR);
+  cpu_flag_toggle_zn (C.YR);
 }
 ======
 TYA!void
 {
   CPU.ACC = CPU.YR;
-  cpu_flag_set_zn (C.ACC);
+  cpu_flag_toggle_zn (C.ACC);
 }
 ======
 TSX!void
 {
   CPU.XR = CPU.SP;
-  cpu_flag_set_zn (C.XR);
+  cpu_flag_toggle_zn (C.XR);
 }
 ======
 TXS!void
@@ -172,31 +172,31 @@ TXS!void
 INX!void
 {
   CPU.XR++;
-  cpu_flag_set_zn (C.XR);
+  cpu_flag_toggle_zn (C.XR);
 }
 ======
 INX!void
 {
   CPU.XR++;
-  cpu_flag_set_zn (C.XR);
+  cpu_flag_toggle_zn (C.XR);
 }
 ======
 INY!void
 {
   CPU.YR++;
-  cpu_flag_set_zn (C.YR);
+  cpu_flag_toggle_zn (C.YR);
 }
 ======
 DEX!void
 {
   CPU.XR--;
-  cpu_flag_set_zn (C.XR);
+  cpu_flag_toggle_zn (C.XR);
 }
 ======
 DEY!void
 {
   CPU.YR--;
-  cpu_flag_set_zn (C.YR);
+  cpu_flag_toggle_zn (C.YR);
 }
 ======
 CMP!byte
@@ -256,24 +256,24 @@ NOP!void
 ======
 PHA!void
 {
-  cpu_stack_push_byte (CPU.ACC);
+  cpu_status_save_acc ();
 }
 ======
 PLA!void
 {
-  CPU.ACC = cpu_stack_pop_byte ();
+  cpu_status_restore_acc ();
 }
 ======
 PHP!void
 {
-  cpu_stack_push_byte (STATUS.B & MASK_BYTE);
-  STATUS.X = 1;
+  cpu_flag_set ('X');
+  cpu_flag_set ('B');
+  cpu_status_save_status ();
 }
 ======
 PLP!void
 {
-  uint8_t byte = cpu_stack_pop_byte ();
-  SET_BITFIELD_FROMNUM (STATUS, byte);
+   cpu_status_restore_flags ();
 }
 ======
 JSR!word
@@ -285,25 +285,20 @@ JSR!word
 ======
 RTS!void
 {
-  uint8_t lo = cpu_stack_pop_byte ();
-  uint8_t hi = cpu_stack_pop_byte ();
-  CPU.PC = (((hi << 8) | lo) + 1) & MASK_SHORT;
+   cpu_status_restore_pc ();
 }
 ======
 RTI!void
 {
-  uint8_t byte = cpu_stack_pop_byte ();
-  SET_BITFIELD_FROMNUM (STATUS, byte);
-  uint8_t lo = cpu_stack_pop_byte ();
-  uint8_t hi = cpu_stack_pop_byte ();
-  CPU.PC = ((hi << 8) | lo) & MASK_SHORT;
+  cpu_status_restore_flags ();
+  cpu_status_restore_pc ();
 }
 ======
 BRK!void
 {
   CPU.PC++;
-  cpu_stack_push_short (CPU.PC);
-  cpu_stack_push_byte (GET_BITFIELD_JOINED (STATUS));
+  cpu_status_save_pc ();
+  cpu_status_save_flags ();
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_write_short (VECADDR_IRQ);
 }
