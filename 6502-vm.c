@@ -55,8 +55,9 @@
 #define SPECIALCASE_BRANCH_CROSS 2
 
 #define GET_PAGE (addr) ((addr >> 8) & MASK_BYTE)
-#define GET_BITFIELD_MERGED (bf) (*((uint8_t *)&bf))
-#define SET_BITFIELD_FROMUM (bf, num) (*((uint8_t *)&bf) = num)
+
+#define BITFIELD_STRUTER (bf) (*((uint8_t *)&bf))
+#define BITFIELD_DESTRUTER (bf, num) (*((uint8_t *)&bf) = num)
 
 typedef uint8_t special_case_t;
 typedef char flag_t;
@@ -64,8 +65,8 @@ typedef uint8_t flag_modstat_t;
 typedef int addr_mode_t;
 
 typedef uint8_t (*u8_identity_t) (uint8_t);
-typedef void (*micro_op_t)(void);
-typedef void (*resolver_fn_t)(void);
+typedef void (*micro_op_t) (void);
+typedef void (*resolver_fn_t) (void);
 
 static struct
 {
@@ -487,6 +488,32 @@ cpu_resvladdr_word_pc_rel (void)
   return target;
 }
 
+// CPU Status Save/Restore Helpers
+
+static inline void
+cpu_status_save_status (void)
+{
+  cpu_stack_push_byte (BITFIELD_STRUTER (STATUS));
+}
+
+static inline void
+cpu_status_restore_status (void)
+{
+  BITFIELD_DESTRUTER (STATUS, cpu_stack_pop_byte ());
+}
+
+static inline void
+cpu_status_save_pc (void)
+{
+  cpu_stack_push_byte (CPU.PC);
+}
+
+static inline void
+cpu_status_restore_pc (void)
+{
+  CPU.PC = cpu_stack_pop_byte ();
+}
+
 // Address Mode Operations
 
 static void
@@ -766,8 +793,8 @@ cpu_handle_nmi (void)
     return;
 
   CPU.pending_NMI = false;
-  cpu_stack_push_word (CPU.PC);
-  cpu_stack_push_byte (GET_BITFIELD_MERGED (STATUS));
+  cpu_state_save_pc ();
+  cpu_state_save_status ();
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_NMI);
   CPU.total_cycles += 7;
@@ -793,8 +820,8 @@ cpu_handle_irq (void)
     return;
 
   CPU.pending_IRQ = false;
-  cpu_stack_push_word (CPU.PC);
-  cpu_stack_push_byte (GET_BITFIELD_MERGED (STATUS));
+  cpu_state_save_pc ();
+  cpu_state_save_status ();
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_read_word (VECADDR_IRQ);
   CPU.total_cycles += 7;
@@ -815,4 +842,3 @@ cpu_dispatch_table (uint8_t opcode)
 	   return;
     }
 }
-
