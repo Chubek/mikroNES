@@ -257,10 +257,10 @@ END
 
 
 ######################################################
-# SECTION 4 — INSTRUCTION BYTES & CYCLES DEFINITIONS
+# SECTION 4 — DISPATCHUCTION BYTES & CYCLES DEFINITIONS
 ######################################################
 # Instruction SIZE (bytes) is determined entirely by addressing mode.
-FUNCTION INSTR_BYTES_FOR_MODE(mode: string) RETURNS u8:
+FUNCTION DISPATCH_BYTES_FOR_MODE(mode: string) RETURNS u8:
     IF mode IN {"impl", "A"}: RETURN 1
     IF mode IN {"#", "zpg", "zpg,X", "zpg,Y", "X,ind", "ind,Y", "rel"}: RETURN 2
     IF mode IN {"abs", "abs,X", "abs,Y", "ind"}: RETURN 3

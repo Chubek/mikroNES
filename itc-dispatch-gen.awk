@@ -52,15 +52,15 @@ BEGIN {
 
 function emit_case(opcode, mnemonic, addrmode, size, cycles, special, flagstat) {
     printf "\tcase %s:\n", opcode
-    printf "\t\tINSTR.mnemonic = \"%s\";\n", mnemonic
-    printf "\t\tINSTR.size_bytes = %s;\n", size
-    printf "\t\tINSTR.resolver = %s;\n", "cpu_addrmode_" map_addr_mode(addrmode)
-    printf "\t\tINSTR.num_cycles = %s;\n", cycles
-    printf "\t\tINSTR.micro_op = %s;\n", "cpu_op_" tolower(mnemonic)
-    printf "\t\tINSTR.special_case = %s;\n", special
+    printf "\t\tDISPATCH.mnemonic = \"%s\";\n", mnemonic
+    printf "\t\tDISPATCH.size_bytes = %s;\n", size
+    printf "\t\tDISPATCH.resolver = %s;\n", "cpu_addrmode_" map_addr_mode(addrmode)
+    printf "\t\tDISPATCH.num_cycles = %s;\n", cycles
+    printf "\t\tDISPATCH.micro_op = %s;\n", "cpu_op_" tolower(mnemonic)
+    printf "\t\tDISPATCH.special_case = %s;\n", special
 
     for (flag in flagstat) {
-	printf "\t\tINSTR.action_%s = %s;\n", flag, flagstat[flag]
+	printf "\t\tDISPATCH.action_%s = %s;\n", flag, flagstat[flag]
     }
 
     printf "\t\treturn;\n"
