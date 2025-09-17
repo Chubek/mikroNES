@@ -591,22 +591,6 @@ cpu_addrmode_rel (void)
   ADDR.page_crossed = false;
 }
 
-// Instruction Lookup Table Function
-
-static void
-cpu_instr_lut (uint8_t opcode)
-{
-  INSTR.opcode = opcode;
-
-  switch (INSTR.opcode)
-    {
-        m4_esyscmd(`cat 6502-instrs.tsv | awk -f instr-lut-gen.awk')m4_dnl
-
-	default:
-	   return;
-    }
-}
-
 // Arithmetic Helpers
 
 static void
@@ -800,3 +784,20 @@ cpu_handle_irq (void)
   CPU.PC = cpu_mem_read_word (VECADDR_IRQ);
   CPU.total_cycles += 7;
 }
+
+// The Indirect Threaded Dispatch Table
+
+static void
+cpu_dispatch_table (uint8_t opcode)
+{
+  INSTR.opcode = opcode;
+
+  switch (INSTR.opcode)
+    {
+        m4_esyscmd(`cat 6502-instrs.tsv | awk -f instr-lut-gen.awk')m4_dnl
+
+	default:
+	   return;
+    }
+}
+
