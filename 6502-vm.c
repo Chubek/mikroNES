@@ -497,6 +497,18 @@ cpu_status_save_flags (void)
 }
 
 static inline void
+cpu_status_save_modified_flags (void)
+{
+  int old_b = FLAGS.B;
+  int old_x = FLAGS.X;
+  FLAGS.B = 1;
+  FLAGS.X = 1;
+  cpu_status_save_flags ();
+  FLAGS.b = old_b;
+  FLAGS.X = old_x;
+}
+
+static inline void
 cpu_status_restore_flags (void)
 {
   BITFIELD_DESTRUTER (FLAGS, cpu_stack_pop_byte ());
