@@ -51,18 +51,14 @@ EOR!byte
 ======
 ADC!byte
 {
-  if (cpu_flag_is_set ('D'))
-    cpu_helper_adc_decimal (OPERAND.byte);
-  else
-    cpu_helper_adc_binary (OPERAND.byte);
+  cpu_flag_is_set ('D') && cpu_helper_adc_decimal (OPERAND.byte) 
+  	|| cpu_helper_adc_binary (OPERAND.byte);
 }
 ======
 SBC!byte
 {
-  if (cpu_flag_is_set ('D'))
-    cpu_helper_sbc_decimal (OPERAND.byte);
-  else
-    cpu_helper_sbc_binary (OPERAND.byte);
+  cpu_flag_is_set ('D') && cpu_helper_sbc_decimal (OPERAND.byte) 
+  	|| cpu_helper_sbc_binary (OPERAND.byte);
 }
 ======
 ASL!byte
@@ -104,16 +100,16 @@ BIT!byte
 ======
 INC!word
 {
-  uint8_t new = (cpu_mem_read_byte (OPERAND.word) + 1) & MASK_BYTE;
-  cpu_mem_write_byte (OPERAND.word, new);
-  cpu_flag_toggle_zn (new);
+  uint8_t increased = (cpu_mem_read_byte (OPERAND.word) + 1) & MASK_BYTE;
+  cpu_mem_write_byte (OPERAND.word, increased);
+  cpu_flag_toggle_zn (increased);
 }
 ======
-INC!word
+DEC!word
 {
-  uint8_t new (cpu_mem_read_byte (OPERAND.word) - 1) & MASK_BYTE;
-  cpu_mem_write_byte (OPERAND.word, new);
-  cpu_flag_toggle_zn (new);
+  uint8_t decreased = (cpu_mem_read_byte (OPERAND.word) - 1) & MASK_BYTE;
+  cpu_mem_write_byte (OPERAND.word, decreased);
+  cpu_flag_toggle_zn (decreased);
 }
 ======
 TAX!void
@@ -266,9 +262,7 @@ PLA!void
 ======
 PHP!void
 {
-  cpu_flag_set ('X');
-  cpu_flag_set ('B');
-  cpu_status_save_status ();
+  cpu_status_save_modified_flags ();
 }
 ======
 PLP!void
@@ -296,9 +290,9 @@ RTI!void
 ======
 BRK!void
 {
-  CPU.PC++;
+  CPU.PC += 2;
   cpu_status_save_pc ();
-  cpu_status_save_flags ();
+  cpu_status_save_modified_flags ();
   cpu_flag_set ('I');
   CPU.PC = cpu_mem_write_short (VECADDR_IRQ);
 }
