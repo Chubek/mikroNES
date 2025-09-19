@@ -504,7 +504,7 @@ cpu_status_save_modified_flags (void)
   FLAGS.B = 1;
   FLAGS.X = 1;
   cpu_status_save_flags ();
-  FLAGS.b = old_b;
+  FLAGS.B = old_b;
   FLAGS.X = old_x;
 }
 
