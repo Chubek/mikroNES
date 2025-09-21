@@ -64,8 +64,8 @@ typedef char flag_t;
 typedef uint8_t flag_modstat;
 typedef int addr_mode_t;
 
-typedef uint8_t (*u8_identity_t) (uint8_t);
-typedef void (*micro_op_t) (void);
+typedef uint8_t (*rmwutil_fn_t) (uint8_t);
+typedef void (*itc_fn_t) (void);
 typedef void (*resolver_fn_t) (void);
 typedef uint16_t (*addrwrap_fn_t) (uint16_t);
 
@@ -112,7 +112,7 @@ static struct
   uint8_t size_bytes;
   uint8_t added_cycles;
   resolver_fn_t resolver_fn;
-  micro_op_t micro_op;
+  itc_fn_t itc_fn;
   special_case_t special_case;
   flag_modstat action_N;
   flag_modstat action_Z;
@@ -770,13 +770,12 @@ cpu_helper_sbc_decimal (uint8_t subtrahend)
 
 // Execution Helpers
 
-static uint8_t
-cpu_helper_rmw (uint16_t addr, u8_identity_t op)
+static void
+cpu_helper_rmw (rmwutil_fn_t op)
 {
-  uint8_t val = cpu_mem_read_byte (addr);
+  uint8_t val = cpu_mem_read_byte (ADDR.eff_addr);
   uint8_t new = op (val);
-  cpu_mem_write_byte (addr, new);
-  return new;
+  cpu_mem_write_byte (ADDR.eff_addr, new);
 }
 
 static bool
