@@ -67,6 +67,7 @@ typedef int addr_mode_t;
 typedef uint8_t (*u8_identity_t) (uint8_t);
 typedef void (*micro_op_t) (void);
 typedef void (*resolver_fn_t) (void);
+typedef uint16_t (*addrwrap_fn_t_t) (uint16_t);
 
 static struct
 {
@@ -131,6 +132,7 @@ static struct
 {
   static uint8_t contents[MEM_SIZE] = { 0 };
   int base_page;
+  addrwrap_fn_t_t wrapaddr_fn;
 } MEMORY;
 
 // Raw Memory Operations -- Byte
@@ -138,14 +140,14 @@ static struct
 static inline uint8_t
 cpu_mem_read_byte (uint16_t addr)
 {
-  assert (addr < MEM_SIZE);
+  addr = wrapaddr_addr (addr);
   return MEMORY.contents[addr];
 }
 
 static inline void
 cpu_mem_write_byte (uint16_t addr, uint8_t val)
 {
-  assert (addr < MEM_SIZE);
+  addr = wrapaddr_fn (addr);
   MEMORY.contents[addr] = val;
 }
 
@@ -154,7 +156,6 @@ cpu_mem_write_byte (uint16_t addr, uint8_t val)
 static inline uint16_t
 cpu_mem_read_word (uint16_t addr)
 {
-  assert (addr + 1 < MEM_SIZE);
   uint8_t lo = cpu_mem_read_byte (addr);
   uint8_t hi = cpu_mem_read_byte (addr + 1);
   return ((hi << 8) | lo);
@@ -163,7 +164,6 @@ cpu_mem_read_word (uint16_t addr)
 static inline void
 cpu_mem_write_word (uint16_t addr, uint16_t val)
 {
-  assert (addr + 1 < MEM_SIZE);
   uint8_t hi = (val >> 8) & MASK_BYTE;
   uint8_t lo = val & MASK_BYTE;
   cpu_mem_write_byte (addr, lo);
@@ -175,14 +175,12 @@ cpu_mem_write_word (uint16_t addr, uint16_t val)
 static inline uint8_t
 cpu_zpg_read_byte (uint8_t zp_addr)
 {
-  assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
   return cpu_zpg_read_byte ((uint16_t)zp_addr);
 }
 
 static inline void
 cpu_zpg_write_byte (uint8_t zp_addr, uint8_t val)
 {
-  assert (zp_addr >= ZERO_PAGE_START && zp_addr < ZERO_PAGE_END);
   cpu_mem_write_byte ((uint16_t)zp_addr, val);
 }
 
@@ -191,7 +189,6 @@ cpu_zpg_write_byte (uint8_t zp_addr, uint8_t val)
 static inline uint8_t
 cpu_zpg_read_word (uint8_t zp_addr)
 {
-  assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
   uint8_t lo = cpu_zpg_read_byte (zp_addr);
   uint8_t hi = cpu_zpg_read_byte (zp_addr + 1);
   return ((hi << 8) | lo);
@@ -200,7 +197,6 @@ cpu_zpg_read_word (uint8_t zp_addr)
 static inline void
 cpu_zpg_write_word (uint8_t zp_addr, uint16_t val)
 {
-  assert (zp_addr >= ZERO_PAGE_START && zp_addr + 1 < ZERO_PAGE_END);
   uint8_t hi = (val >> 8) & MASK_BYTE;
   uint8_t lo = val & MASK_BYTE;
   cpu_zpg_write_byte (zp_addr, lo);
@@ -212,14 +208,12 @@ cpu_zpg_write_word (uint8_t zp_addr, uint16_t val)
 static inline void
 cpu_stack_push_byte (uint8_t val)
 {
-  assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
   cpu_mem_write_byte (CPU.SP--, val);
 }
 
 static inline uint8_t
 cpu_stack_pop_byte (void)
 {
-  assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
   return cpu_mem_read_byte (++CP.SP);
 }
 
@@ -228,7 +222,6 @@ cpu_stack_pop_byte (void)
 static inline void
 cpu_stack_push_word (uint8_t val)
 {
-  assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
   uint8_t hi = (val >> 8) && MASK_BYTE;
   uint8_t lo = val && MASK_BYTE;
   cpu_stack_push_byte (hi);
@@ -238,7 +231,6 @@ cpu_stack_push_word (uint8_t val)
 static inline uint16_t
 cpu_stack_pop_word (void)
 {
-  assert (CPU.SP >= STACK_START && CPU.SP < STACK_END);
   uint8_t lo = cpu_stack_pop_byte ();
   uint8_t hi = cpu_stack_pop_byte ();
   return ((hi << 8) | lo);
