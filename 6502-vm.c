@@ -61,13 +61,13 @@
 
 typedef uint8_t special_case_t;
 typedef char flag_t;
-typedef uint8_t flag_modstat_t;
+typedef uint8_t flag_modstat;
 typedef int addr_mode_t;
 
 typedef uint8_t (*u8_identity_t) (uint8_t);
 typedef void (*micro_op_t) (void);
 typedef void (*resolver_fn_t) (void);
-typedef uint16_t (*addrwrap_fn_t_t) (uint16_t);
+typedef uint16_t (*addrwrap_fn_t) (uint16_t);
 
 static struct
 {
@@ -114,12 +114,12 @@ static struct
   resolver_fn_t resolver_fn;
   micro_op_t micro_op;
   special_case_t special_case;
-  flag_modstat_t action_N;
-  flag_modstat_t action_Z;
-  flag_modstat_t action_C;
-  flag_modstat_t action_I;
-  flag_modstat_t action_D;
-  flag_modstat_t action_V;
+  flag_modstat action_N;
+  flag_modstat action_Z;
+  flag_modstat action_C;
+  flag_modstat action_I;
+  flag_modstat action_D;
+  flag_modstat action_V;
 } DISPATCH;
 
 static struct
@@ -132,7 +132,7 @@ static struct
 {
   static uint8_t contents[MEM_SIZE] = { 0 };
   int base_page;
-  addrwrap_fn_t_t wrapaddr_fn;
+  addrwrap_fn_t wrapaddr_fn;
 } MEMORY;
 
 // Raw Memory Operations -- Byte
