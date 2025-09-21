@@ -536,7 +536,7 @@ END
 FUNCTION SH_ROR(C: CPU, v: u8) RETURNS u8:
     oldC := GET_FLAG(C, FLAG_C) ? 1 : 0
     SET_FLAG(C, FLAG_C, (v AND 0x01) != 0)
-    out := ((v >> 1) OR (oldC << 7)) AND 0xFF
+  out := ((v >> 1) OR (oldC << 7)) AND 0xFF
     SET_ZN(C, out)
     RETURN out
 END

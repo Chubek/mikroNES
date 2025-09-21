@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "6502-itc.h"
+
 #define MEM_SIZE 0x10000
 #define ZERO_PAGE_BEGIN 0x0
 #define ZERO_PAGE_END 0xFF
