@@ -770,12 +770,13 @@ cpu_helper_sbc_decimal (uint8_t subtrahend)
 
 // Execution Helpers
 
-static void
+static uint8_t
 cpu_helper_rmw (rmwutil_fn_t op)
 {
   uint8_t val = cpu_mem_read_byte (ADDR.eff_addr);
   uint8_t new = op (val);
   cpu_mem_write_byte (ADDR.eff_addr, new);
+  return new;
 }
 
 static bool
