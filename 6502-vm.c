@@ -548,7 +548,7 @@ cpu_addrmode_acc (void)
 {
   ADDR.mode = ADDRMODE_ACC;
   ADDR.eff_addr = 0;
-  ADDR.fetched = CPU.AC;
+  ADDR.fetched = CPU.ACC;
   ADDR.page_crossed = false;
 }
 
