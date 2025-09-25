@@ -351,3 +351,51 @@ cpu_itc_jmp (void)
 {
   CPU.PC = OPERAND.word & MASK_SHORT;
 }
+
+static void
+cpu_itc_bpl (void)
+{
+  cpu_helper_branch (cpu_flag_is_unset ('N'));
+}
+
+static void
+cpu_itc_bmi (void)
+{
+  cpu_helper_branch (cpu_flag_is_set ('N'));
+}
+
+static void
+cpu_itc_bvc (void)
+{
+  cpu_helper_branch (cpu_flag_is_unset ('V'));
+}
+
+static void
+cpu_itc_bvs (void)
+{
+  cpu_helper_branch (cpu_flag_is_set ('V'));
+}
+
+static void
+cpu_itc_bcc (void)
+{
+  cpu_helper_branch (cpu_flag_is_unset ('C'));
+}
+
+static void
+cpu_itc_bcs (void)
+{
+  cpu_helper_branch (cpu_flag_is_set ('C'));
+}
+
+static void
+cpu_itc_bne (void)
+{
+  cpu_helper_branch (cpu_flag_is_unset ('Z'));
+}
+
+static void
+cpu_itc_beq (void)
+{
+  cpu_helper_branch (cpu_flag_is_set ('Z'));
+}
