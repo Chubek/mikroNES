@@ -142,7 +142,7 @@ static struct
 static inline uint8_t
 cpu_mem_read_byte (uint16_t addr)
 {
-  addr = wrapaddr_addr (addr);
+  addr = wrapadde_fn (addr);
   return MEMORY.contents[addr];
 }
 
@@ -860,3 +860,5 @@ cpu_dispatch_table (uint8_t opcode)
 	   return;
     }
 }
+
+
