@@ -1,0 +1,134 @@
+############################################################
+#  NES CONTROLLER INPUT SYSTEM                              #
+#  LITERATE, IMPERATIVE PSEUDO-CODE                        #
+############################################################
+
+########################################
+# SECTION 0 — NUMERIC & BIT CONVENTIONS
+########################################
+
+CONST ADDR_CONTROLLER1 = 0x4016
+CONST ADDR_CONTROLLER2 = 0x4017
+
+# Controller button bit positions:
+CONST BUTTON_A      = 0
+CONST BUTTON_B      = 1
+CONST BUTTON_SELECT = 2
+CONST BUTTON_START  = 3
+CONST BUTTON_UP     = 4
+CONST BUTTON_DOWN   = 5
+CONST BUTTON_LEFT   = 6
+CONST BUTTON_RIGHT  = 7
+
+# Bitmask for button state:
+CONST MASK_BUTTON_A      = 1 << BUTTON_A
+CONST MASK_BUTTON_B      = 1 << BUTTON_B
+CONST MASK_BUTTON_SELECT = 1 << BUTTON_SELECT
+CONST MASK_BUTTON_START  = 1 << BUTTON_START
+CONST MASK_BUTTON_UP     = 1 << BUTTON_UP
+CONST MASK_BUTTON_DOWN   = 1 << BUTTON_DOWN
+CONST MASK_BUTTON_LEFT   = 1 << BUTTON_LEFT
+CONST MASK_BUTTON_RIGHT  = 1 << BUTTON_RIGHT
+
+######################################
+# SECTION 1 — CONTROLLER STRUCTURE
+######################################
+
+STRUCT Controller:
+    state      : u8     # current button state (1 = pressed)
+    shift_reg  : u8     # internal shift register for serial readout
+    strobe     : bool   # strobe line state
+END
+
+######################################
+# SECTION 2 — INPUT SYSTEM STATE
+######################################
+
+STRUCT InputSystem:
+    controller1 : Controller
+    controller2 : Controller
+END
+
+######################################
+# SECTION 3 — INITIALIZATION
+######################################
+
+FUNCTION INIT_INPUT(input: InputSystem):
+    input.controller1 := Controller(state: 0, shift_reg: 0, strobe: false)
+    input.controller2 := Controller(state: 0, shift_reg: 0, strobe: false)
+END
+
+######################################
+# SECTION 4 — UPDATE CONTROLLER STATE
+######################################
+
+# Call this once per frame or whenever physical input changes
+FUNCTION UPDATE_CONTROLLER(controller: Controller, new_state: u8):
+    controller.state := new_state
+END
+
+######################################
+# SECTION 5 — SERIAL READOUT LOGIC
+######################################
+
+# Called when $4016 or $4017 is read
+FUNCTION READ_CONTROLLER(controller: Controller) RETURNS u8:
+    bit := controller.shift_reg AND 1
+    IF controller.strobe == false:
+        controller.shift_reg := controller.shift_reg >> 1
+    END
+    RETURN bit
+END
+
+# Called when $4016 is written to (strobe)
+FUNCTION WRITE_CONTROLLER(controller: Controller, value: u8):
+    IF (value AND 1) != 0:
+        controller.strobe := true
+        controller.shift_reg := controller.state
+    ELSE:
+        IF controller.strobe == true:
+            controller.strobe := false
+            controller.shift_reg := controller.state
+        END
+    END
+END
+
+######################################
+# SECTION 6 — CPU MEMORY INTERFACE
+######################################
+
+# Called by CPU when reading $4016 or $4017
+FUNCTION INPUT_READ(input: InputSystem, addr: u16) RETURNS u8:
+    SWITCH addr:
+        CASE 0x4016:
+            RETURN READ_CONTROLLER(input.controller1)
+        CASE 0x4017:
+            RETURN READ_CONTROLLER(input.controller2)
+        DEFAULT:
+            RETURN 0
+    END
+END
+
+# Called by CPU when writing to $4016
+FUNCTION INPUT_WRITE(input: InputSystem, addr: u16, value: u8):
+    IF addr == 0x4016:
+        WRITE_CONTROLLER(input.controller1, value)
+        WRITE_CONTROLLER(input.controller2, value)
+    END
+END
+
+######################################
+# SECTION 7 — EXAMPLE USAGE
+######################################
+
+# Simulate pressing A + Right
+FUNCTION EXAMPLE_PRESS_A_RIGHT(input: InputSystem):
+    state := MASK_BUTTON_A OR MASK_BUTTON_RIGHT
+    UPDATE_CONTROLLER(input.controller1, state)
+END
+
+# Simulate releasing all buttons
+FUNCTION EXAMPLE_RELEASE_ALL(input: InputSystem):
+    UPDATE_CONTROLLER(input.controller1, 0)
+END
+
