@@ -1,0 +1,617 @@
+############################################################
+#  NES PPU — LITERATE, IMPERATIVE PSEUDO-CODE EMULATOR     #
+#  Focus: clarity, correctness, portability                #
+############################################################
+
+########################################
+# SECTION 0 — NUMERIC & BIT CONVENTIONS
+########################################
+#  • All integer registers are 8-bit unless stated.
+#  • PPU has 16KB of addressable space ($0000..$3FFF)
+#  • "$" marks hexadecimal in comments; arithmetic is done modulo 8 or 16 bits as stated.
+#  • PPU rendering is scanline-based with 262 scanlines per frame (NTSC)
+#  • Each scanline has 341 PPU cycles
+#  • Visible screen is 256x240 pixels
+
+CONST MASK_BYTE     = 0xFF
+CONST MASK_WORD     = 0xFFFF
+CONST PPU_ADDR_MASK = 0x3FFF
+
+# PPU Registers
+CONST PPUCTRL   = 0x2000  # PPU Control Register 1
+CONST PPUMASK   = 0x2001  # PPU Control Register 2
+CONST PPUSTATUS = 0x2002  # PPU Status Register
+CONST OAMADDR   = 0x2003  # OAM Address
+CONST OAMDATA   = 0x2004  # OAM Data
+CONST PPUSCROLL = 0x2005  # PPU Scroll
+CONST PPUADDR   = 0x2006  # PPU Address
+CONST PPUDATA   = 0x2007  # PPU Data
+CONST OAMDMA    = 0x4014  # OAM DMA
+
+# PPU Status Flags
+CONST STATUS_VBLANK     = 0x80  # VBlank has started
+CONST STATUS_SPRITE0    = 0x40  # Sprite 0 hit
+CONST STATUS_SPRITE_OVF = 0x20  # Sprite overflow
+
+# PPU Control Flags
+CONST CTRL_NMI_ENABLE       = 0x80
+CONST CTRL_MASTER_SLAVE     = 0x40
+CONST CTRL_SPRITE_HEIGHT    = 0x20  # 0: 8x8, 1: 8x16
+CONST CTRL_BG_PATTERN_ADDR  = 0x10  # 0: $0000, 1: $1000
+CONST CTRL_SPRITE_PATTERN_ADDR = 0x08  # 0: $0000, 1: $1000
+CONST CTRL_INCREMENT_MODE   = 0x04  # 0: increment by 1, 1: increment by 32
+CONST CTRL_NAMETABLE_ADDR   = 0x03  # 0: $2000, 1: $2400, 2: $2800, 3: $2C00
+
+# PPU Mask Flags
+CONST MASK_EMPHASIZE_BLUE   = 0x80
+CONST MASK_EMPHASIZE_GREEN  = 0x40
+CONST MASK_EMPHASIZE_RED    = 0x20
+CONST MASK_SPRITE_ENABLE    = 0x10
+CONST MASK_BG_ENABLE        = 0x08
+CONST MASK_SPRITE_LEFT_COL  = 0x04
+CONST MASK_BG_LEFT_COL      = 0x02
+CONST MASK_GREYSCALE        = 0x01
+
+# Rendering constants
+CONST SCANLINE_VISIBLE      = 240
+CONST SCANLINE_VBLANK_START = 241
+CONST SCANLINE_FRAME_END    = 261
+CONST CYCLES_PER_SCANLINE   = 341
+CONST CYCLES_PER_FRAME      = SCANLINE_FRAME_END * CYCLES_PER_SCANLINE
+
+######################################
+# SECTION 1 — PPU STATE & MEMORY
+######################################
+STRUCT PPU:
+    # Registers
+    ctrl        : u8        # $2000 - PPU Control Register
+    mask        : u8        # $2001 - PPU Mask Register
+    status      : u8        # $2002 - PPU Status Register
+    oam_addr    : u8        # $2003 - OAM Address
+    scroll_x    : u8        # $2005 - Scroll X (temp)
+    scroll_y    : u8        # $2005 - Scroll Y (temp)
+    addr        : u16       # $2006 - VRAM Address
+    data_buffer : u8        # $2007 - Data buffer for reads
+    
+    # Internal registers
+    fine_x      : u8        # Fine X scroll (3 bits)
+    write_latch : bool      # Toggle for scroll/address writes
+    scroll_latch: bool      # Toggle for scroll register writes
+    addr_latch  : bool      # Toggle for address register writes
+    
+    # Rendering state
+    scanline    : u16       # Current scanline (0-261)
+    cycle       : u16       # Current cycle within scanline (0-340)
+    frame_count : u64       # Total frames rendered
+    even_frame  : bool      # Even/odd frame flag for NTSC
+    
+    # Memory
+    vram        : ARRAY[0..0x3FFF] OF u8  # 16KB of PPU address space
+    oam         : ARRAY[0..255] OF u8     # 256 bytes of OAM (sprites)
+    palette     : ARRAY[0..31] OF u8      # Palette RAM (32 bytes)
+    
+    # Rendering buffers
+    primary_oam : ARRAY[0..63] OF STRUCT  # Primary OAM (8 bytes per sprite)
+        y           : u8
+        tile_index  : u8
+        attributes  : u8
+        x           : u8
+    END
+    
+    secondary_oam : ARRAY[0..7] OF STRUCT  # Secondary OAM (8 sprites max per scanline)
+        y           : u8
+        tile_index  : u8
+        attributes  : u8
+        x           : u8
+        pattern_lo  : u8
+        pattern_hi  : u8
+    END
+    
+    # Rendering flags
+    rendering_enabled : bool  # True when BG or sprite rendering is enabled
+    vblank_started    : bool  # True when VBlank has started
+    suppress_vblank   : bool  # Suppress VBlank flag for one frame after reset
+    
+END
+
+# Memory mapping helpers
+FUNCTION GET_NAMETABLE_INDEX(addr: u16) RETURNS u8:
+    # Nametables are mirrored in 0x2000-0x3EFF range
+    base := addr AND 0x0FFF
+    RETURN base >> 10  # Returns 0-3 for nametable index
+END
+
+FUNCTION GET_NAMETABLE_MIRROR(addr: u16) RETURNS u16:
+    # Apply mirroring to nametable addresses
+    # This would be implemented based on cartridge mirroring mode
+    # For now, assuming horizontal mirroring (0=1, 2=3)
+    base := addr AND 0x0FFF
+    nt_index := base >> 10
+    
+    SWITCH nt_index:
+        CASE 1: RETURN (base AND 0x03FF) OR 0x2000  # NT1 -> NT0
+        CASE 2: RETURN (base AND 0x03FF) OR 0x2800  # NT2 -> NT2
+        CASE 3: RETURN (base AND 0x03FF) OR 0x2800  # NT3 -> NT2
+        DEFAULT: RETURN addr
+    END
+END
+
+######################################
+# SECTION 2 — PPU MEMORY ACCESS
+######################################
+FUNCTION PPU_READ(C: PPU, addr: u16) RETURNS u8:
+    # Apply address mask
+    addr := addr AND PPU_ADDR_MASK
+    
+    # Handle different memory regions
+    IF addr < 0x2000:
+        # Pattern tables (CHR ROM/RAM)
+        RETURN C.vram[addr]
+    ELIF addr < 0x3F00:
+        # Nametables with mirroring
+        mirrored_addr := GET_NAMETABLE_MIRROR(addr)
+        RETURN C.vram[mirrored_addr]
+    ELIF addr < 0x4000:
+        # Palette RAM
+        palette_addr := addr AND 0x1F
+        # Mirror $3F10/$3F14/$3F18/$3F1C to $3F00/$3F04/$3F08/$3F0C
+        IF palette_addr >= 0x10 AND (palette_addr AND 0x03) == 0:
+            palette_addr := palette_addr AND 0x0F
+        END
+        RETURN C.palette[palette_addr]
+    ELSE:
+        # Invalid address, return 0
+        RETURN 0
+    END
+END
+
+FUNCTION PPU_WRITE(C: PPU, addr: u16, value: u8):
+    # Apply address mask
+    addr := addr AND PPU_ADDR_MASK
+    value := value AND MASK_BYTE
+    
+    # Handle different memory regions
+    IF addr < 0x2000:
+        # Pattern tables (CHR ROM/RAM)
+        C.vram[addr] := value
+    ELIF addr < 0x3F00:
+        # Nametables with mirroring
+        mirrored_addr := GET_NAMETABLE_MIRROR(addr)
+        C.vram[mirrored_addr] := value
+    ELIF addr < 0x4000:
+        # Palette RAM
+        palette_addr := addr AND 0x1F
+        # Mirror $3F10/$3F14/$3F18/$3F1C to $3F00/$3F04/$3F08/$3F0C
+        IF palette_addr >= 0x10 AND (palette_addr AND 0x03) == 0:
+            palette_addr := palette_addr AND 0x0F
+        END
+        C.palette[palette_addr] := value
+    END
+END
+
+######################################
+# SECTION 3 — PPU REGISTER ACCESS
+######################################
+FUNCTION READ_PPU_REGISTER(C: PPU, reg_addr: u16) RETURNS u8:
+    SWITCH reg_addr:
+        CASE PPUSTATUS:
+            # Reading status clears bit 7 (VBlank) and address latch
+            result := C.status
+            C.status := C.status AND (NOT STATUS_VBLANK)
+            C.write_latch := false
+            C.scroll_latch := false
+            C.addr_latch := false
+            RETURN result
+            
+        CASE OAMDATA:
+            RETURN C.oam[C.oam_addr]
+            
+        CASE PPUDATA:
+            # Read from current address
+            data := PPU_READ(C, C.addr)
+            
+            # For palette reads, return immediately
+            IF (C.addr AND 0x3F00) == 0x3F00:
+                C.data_buffer := data
+            END
+            
+            # Increment address
+            IF (C.ctrl AND CTRL_INCREMENT_MODE) != 0:
+                C.addr := (C.addr + 32) AND 0x7FFF
+            ELSE:
+                C.addr := (C.addr + 1) AND 0x7FFF
+            END
+            
+            RETURN C.data_buffer
+            
+        DEFAULT:
+            RETURN 0
+    END
+END
+
+FUNCTION WRITE_PPU_REGISTER(C: PPU, reg_addr: u16, value: u8):
+    value := value AND MASK_BYTE
+    
+    SWITCH reg_addr:
+        CASE PPUCTRL:
+            C.ctrl := value
+            # Update nametable address in internal registers
+            # (Implementation would update internal scroll registers)
+            
+        CASE PPUMASK:
+            C.mask := value
+            C.rendering_enabled := (value AND (MASK_BG_ENABLE OR MASK_SPRITE_ENABLE)) != 0
+            
+        CASE OAMADDR:
+            C.oam_addr := value
+            
+        CASE OAMDATA:
+            C.oam[C.oam_addr] := value
+            C.oam_addr := (C.oam_addr + 1) AND 0xFF
+            
+        CASE PPUSCROLL:
+            IF NOT C.scroll_latch:
+                # First write - horizontal scroll
+                C.scroll_x := value
+                C.fine_x := value AND 0x07
+            ELSE:
+                # Second write - vertical scroll
+                C.scroll_y := value
+            END
+            C.scroll_latch := NOT C.scroll_latch
+            
+        CASE PPUADDR:
+            IF NOT C.addr_latch:
+                # First write - high byte
+                C.addr := ((value AND 0x3F) << 8) OR (C.addr AND 0x00FF)
+            ELSE:
+                # Second write - low byte
+                C.addr := (C.addr AND 0xFF00) OR value
+            END
+            C.addr_latch := NOT C.addr_latch
+            
+        CASE PPUDATA:
+            PPU_WRITE(C, C.addr, value)
+            # Increment address
+            IF (C.ctrl AND CTRL_INCREMENT_MODE) != 0:
+                C.addr := (C.addr + 32) AND 0x7FFF
+            ELSE:
+                C.addr := (C.addr + 1) AND 0x7FFF
+            END
+            
+        CASE OAMDMA:
+            # DMA transfer from CPU memory to OAM
+            dma_page := value << 8
+            FOR i := 0 TO 255:
+                C.oam[i] := CPU_READ(dma_page + i)  # Assume CPU_READ function exists
+            END
+            # DMA takes 513 or 514 cycles depending on even/odd cycle
+            # (Implementation would stall CPU for this duration)
+            
+    END
+END
+
+######################################
+# SECTION 4 — RENDERING HELPERS
+######################################
+FUNCTION GET_TILE_ADDRESS(C: PPU, nametable_addr: u16, tile_index: u8) RETURNS u16:
+    # Determine pattern table address based on control register
+    IF (C.ctrl AND CTRL_BG_PATTERN_ADDR) != 0:
+        base_addr := 0x1000
+    ELSE:
+        base_addr := 0x0000
+    END
+    
+    RETURN base_addr OR (tile_index << 4)
+END
+
+FUNCTION GET_SPRITE_PATTERN_ADDRESS(C: PPU, tile_index: u8, row: u8) RETURNS u16:
+    # Determine sprite pattern table address
+    IF (C.ctrl AND CTRL_SPRITE_PATTERN_ADDR) != 0:
+        base_addr := 0x1000
+    ELSE:
+        base_addr := 0x0000
+    END
+    
+    # Handle 8x16 sprites
+    IF (C.ctrl AND CTRL_SPRITE_HEIGHT) != 0:
+        # 8x16 sprites use different addressing
+        pattern_table := (tile_index AND 0x01) << 12
+        tile_number := tile_index AND 0xFE
+        IF row >= 8:
+            tile_number := tile_number + 1
+            row := row - 8
+        END
+        RETURN pattern_table OR (tile_number << 4) OR row
+    ELSE:
+        # 8x8 sprites
+        RETURN base_addr OR (tile_index << 4) OR row
+    END
+END
+
+FUNCTION GET_PALETTE_COLOR(C: PPU, palette_index: u8) RETURNS u8:
+    # Get color from palette RAM
+    RETURN C.palette[palette_index AND 0x1F]
+END
+
+######################################
+# SECTION 5 — SPRITE EVALUATION
+######################################
+FUNCTION EVALUATE_SPRITES(C: PPU):
+    # Clear secondary OAM
+    FOR i := 0 TO 7:
+        C.secondary_oam[i].y := 0xFF
+        C.secondary_oam[i].tile_index := 0
+        C.secondary_oam[i].attributes := 0
+        C.secondary_oam[i].x := 0
+        C.secondary_oam[i].pattern_lo := 0
+        C.secondary_oam[i].pattern_hi := 0
+    END
+    
+    sprite_height := 8
+    IF (C.ctrl AND CTRL_SPRITE_HEIGHT) != 0:
+        sprite_height := 16
+    END
+    
+    sprite_count := 0
+    sprite_overflow := false
+    
+    # Scan primary OAM for sprites on current scanline
+    FOR i := 0 TO 63:
+        sprite_y := C.oam[i * 4]
+        sprite_row := C.scanline - sprite_y
+        
+        # Check if sprite is on current scanline
+        IF sprite_row >= 0 AND sprite_row < sprite_height:
+            IF sprite_count < 8:
+                # Copy sprite to secondary OAM
+                C.secondary_oam[sprite_count].y := sprite_y
+                C.secondary_oam[sprite_count].tile_index := C.oam[i * 4 + 1]
+                C.secondary_oam[sprite_count].attributes := C.oam[i * 4 + 2]
+                C.secondary_oam[sprite_count].x := C.oam[i * 4 + 3]
+                
+                # Fetch sprite pattern data
+                row_in_tile := sprite_row
+                IF (C.secondary_oam[sprite_count].attributes AND 0x80) != 0:
+                    # Vertical flip
+                    row_in_tile := sprite_height - 1 - row_in_tile
+                END
+                
+                pattern_addr := GET_SPRITE_PATTERN_ADDRESS(C, C.secondary_oam[sprite_count].tile_index, row_in_tile)
+                C.secondary_oam[sprite_count].pattern_lo := PPU_READ(C, pattern_addr)
+                C.secondary_oam[sprite_count].pattern_hi := PPU_READ(C, pattern_addr + 8)
+                
+                sprite_count := sprite_count + 1
+            ELSE:
+                # Sprite overflow
+                C.status := C.status OR STATUS_SPRITE_OVF
+                sprite_overflow := true
+                BREAK
+            END
+        END
+    END
+END
+
+######################################
+# SECTION 6 — PIXEL RENDERING
+######################################
+FUNCTION RENDER_PIXEL(C: PPU, x: u16, y: u16):
+    bg_color := 0
+    sprite_color := 0
+    bg_priority := false
+    sprite_index := 0xFF
+    
+    # Background rendering
+    IF (C.mask AND MASK_BG_ENABLE) != 0 AND (x >= 8 OR (C.mask AND MASK_BG_LEFT_COL) != 0):
+        # Calculate which background tile and pixel we're on
+        # This is a simplified version - full implementation would use internal registers
+        tile_x := x >> 3
+        tile_y := y >> 3
+        pixel_x := x AND 0x07
+        pixel_y := y AND 0x07
+        
+        # Get nametable address (simplified)
+        nametable_base := 0x2000 OR ((C.ctrl AND CTRL_NAMETABLE_ADDR) << 10)
+        tile_addr := nametable_base OR (tile_y << 5) OR tile_x
+        tile_index := PPU_READ(C, tile_addr)
+        
+        # Get pattern data
+        pattern_addr := GET_TILE_ADDRESS(C, nametable_base, tile_index)
+        pattern_lo := PPU_READ(C, pattern_addr + pixel_y)
+        pattern_hi := PPU_READ(C, pattern_addr + pixel_y + 8)
+        
+        # Extract color bits
+        bit_lo := (pattern_lo >> (7 - pixel_x)) AND 0x01
+        bit_hi := (pattern_hi >> (7 - pixel_x)) AND 0x01
+        bg_color_index := (bit_hi << 1) OR bit_lo
+        
+        IF bg_color_index != 0:
+            # Get attribute byte for palette selection
+            attr_addr := nametable_base OR 0x03C0 OR ((tile_y >> 2) << 3) OR (tile_x >> 2)
+            attr_byte := PPU_READ(C, attr_addr)
+            attr_shift := ((tile_y AND 0x02) << 1) OR (tile_x AND 0x02)
+            palette_index := (attr_byte >> attr_shift) AND 0x03
+            bg_color := GET_PALETTE_COLOR(C, (palette_index << 2) OR bg_color_index)
+        END
+    END
+    
+    # Sprite rendering
+    IF (C.mask AND MASK_SPRITE_ENABLE) != 0 AND (x >= 8 OR (C.mask AND MASK_SPRITE_LEFT_COL) != 0):
+        # Check sprites in secondary OAM
+        FOR i := 7 DOWNTO 0:  # Render in reverse order (priority)
+            sprite := C.secondary_oam[i]
+            IF x >= sprite.x AND x < sprite.x + 8:
+                pixel_in_sprite := x - sprite.x
+                
+                # Handle horizontal flip
+                IF (sprite.attributes AND 0x40) != 0:
+                    pixel_in_sprite := 7 - pixel_in_sprite
+                END
+                
+                # Extract color bits
+                bit_lo := (sprite.pattern_lo >> (7 - pixel_in_sprite)) AND 0x01
+                bit_hi := (sprite.pattern_hi >> (7 - pixel_in_sprite)) AND 0x01
+                sprite_color_index := (bit_hi << 1) OR bit_lo
+                
+                IF sprite_color_index != 0:
+                    sprite_palette := (sprite.attributes AND 0x03) + 4
+                    sprite_color := GET_PALETTE_COLOR(C, (sprite_palette << 2) OR sprite_color_index)
+                    bg_priority := (sprite.attributes AND 0x20) != 0
+                    sprite_index := i
+                    BREAK  # First opaque sprite pixel wins
+                END
+            END
+        END
+    END
+    
+    # Combine background and sprite pixels
+    final_color := 0
+    
+    IF sprite_color != 0 AND bg_color != 0:
+        # Both pixels are opaque - check sprite 0 hit
+        IF sprite_index == 0 AND x != 255:
+            C.status := C.status OR STATUS_SPRITE0
+        END
+        
+        # Determine which pixel to show based on priority
+        IF bg_priority:
+            final_color := bg_color
+        ELSE:
+            final_color := sprite_color
+        END
+    ELIF sprite_color != 0:
+        final_color := sprite_color
+    ELSE:
+        final_color := bg_color
+    END
+    
+    # If no pixel is rendered, use backdrop color (palette 0)
+    IF final_color == 0:
+        final_color := GET_PALETTE_COLOR(C, 0)
+    END
+    
+    # Apply greyscale if enabled
+    IF (C.mask AND MASK_GREYSCALE) != 0:
+        final_color := final_color AND 0x30
+    END
+    
+    # Output pixel (implementation would store in framebuffer)
+    OUTPUT_PIXEL(x, y, final_color)  # Assume OUTPUT_PIXEL function exists
+END
+
+######################################
+# SECTION 7 — SCANLINE PROCESSING
+######################################
+FUNCTION PROCESS_SCANLINE(C: PPU):
+    IF C.scanline < SCANLINE_VISIBLE:
+        # Visible scanlines (0-239)
+        IF C.rendering_enabled:
+            # Evaluate sprites for next scanline
+            IF C.scanline == SCANLINE_VISIBLE - 1:
+                EVALUATE_SPRITES(C)
+            END
+            
+            # Render pixels
+            FOR x := 0 TO 255:
+                RENDER_PIXEL(C, x, C.scanline)
+            END
+        END
+    ELIF C.scanline == SCANLINE_VBLANK_START:
+        # Start of VBlank (scanline 241)
+        C.vblank_started := true
+        C.status := C.status OR STATUS_VBLANK
+        
+        # Generate NMI if enabled
+        IF (C.ctrl AND CTRL_NMI_ENABLE) != 0 AND NOT C.suppress_vblank:
+            TRIGGER_NMI()  # Assume TRIGGER_NMI function exists
+        END
+        C.suppress_vblank := false
+    END
+END
+
+######################################
+# SECTION 8 — MAIN PPU STEP FUNCTION
+######################################
+FUNCTION PPU_STEP(C: PPU):
+    # Process one PPU cycle
+    IF C.scanline < SCANLINE_VISIBLE AND C.cycle == 0 AND C.rendering_enabled:
+        # Evaluate sprites for this scanline at the beginning
+        EVALUATE_SPRITES(C)
+    END
+    
+    # Increment cycle
+    C.cycle := C.cycle + 1
+    
+    # Check if we've completed a scanline
+    IF C.cycle >= CYCLES_PER_SCANLINE:
+        C.cycle := 0
+        PROCESS_SCANLINE(C)
+        C.scanline := C.scanline + 1
+        
+        # Check if we've completed a frame
+        IF C.scanline > SCANLINE_FRAME_END:
+            C.scanline := 0
+            C.frame_count := C.frame_count + 1
+            C.even_frame := NOT C.even_frame
+            C.vblank_started := false
+            C.status := C.status AND (NOT (STATUS_VBLANK OR STATUS_SPRITE0 OR STATUS_SPRITE_OVF))
+        END
+    END
+END
+
+######################################
+# SECTION 9 — INITIALIZATION
+######################################
+PROCEDURE INIT_PPU(C: PPU):
+    # Initialize all fields to default values
+    C.ctrl := 0
+    C.mask := 0
+    C.status := 0
+    C.oam_addr := 0
+    C.scroll_x := 0
+    C.scroll_y := 0
+    C.addr := 0
+    C.data_buffer := 0
+    C.fine_x := 0
+    C.write_latch := false
+    C.scroll_latch := false
+    C.addr_latch := false
+    C.scanline := 0
+    C.cycle := 0
+    C.frame_count := 0
+    C.even_frame := true
+    C.rendering_enabled := false
+    C.vblank_started := false
+    C.suppress_vblank := true  # Suppress first VBlank after reset
+    
+    # Clear memory
+    FOR i := 0 TO 0x3FFF:
+        C.vram[i] := 0
+    END
+    
+    FOR i := 0 TO 255:
+        C.oam[i] := 0
+    END
+    
+    FOR i := 0 TO 31:
+        C.palette[i] := 0
+    END
+    
+    # Clear OAM structures
+    FOR i := 0 TO 63:
+        C.primary_oam[i].y := 0
+        C.primary_oam[i].tile_index := 0
+        C.primary_oam[i].attributes := 0
+        C.primary_oam[i].x := 0
+    END
+    
+    FOR i := 0 TO 7:
+        C.secondary_oam[i].y := 0
+        C.secondary_oam[i].tile_index := 0
+        C.secondary_oam[i].attributes := 0
+        C.secondary_oam[i].x := 0
+        C.secondary_oam[i].pattern_lo := 0
+        C.secondary_oam[i].pattern_hi := 0
+    END
+END
+
