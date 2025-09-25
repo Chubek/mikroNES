@@ -304,6 +304,12 @@ cpu_flag_is_set (flag_t flag)
   return false;
 }
 
+static inline bool
+cpu_flag_is_unset (flag_t flag)
+{
+  return !cpu_flag_is_set (flag);
+}
+
 static inline void
 cpu_flag_set (flag_t flag)
 {
@@ -794,7 +800,6 @@ cpu_helper_branch (bool cond)
 {
   if (!cond)
     return;
-  MEMORY.base_page = GET_PAGE (CPU.PC);
   CPU.PC = OPERAND.word;
   if (ADDR.page_crossed)
     CPU.total_cycles += 2;
