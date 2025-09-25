@@ -16,7 +16,13 @@
 #define PPUREG_SCROLL 0x2005
 #define PPUREG_ADDR 0x2006
 #define PPUREG_DATA 0x2007
-#define PPUREG_OAMDMA 9x4014
+#define PPUREG_OAMDMA 0x4014
+
+#define SCANLINE_VISIBLE 240
+#define SCANLINE_VBLANK_START 241
+#define SCANLINE_FRAME_END 261
+#define CYCLES_PER_SCANLINE 341
+#define CYCLES_PER_FRAME (SCANLINE_FRAME_END * CYCLES_PER_SCANLINE)
 
 static struct
 {
@@ -27,7 +33,7 @@ static struct
 
 static struct
 {
-  uint8_t nmi_enabled : 1;
+  uint8_t nmi_enbl : 1;
   uint8_t master_slave : 1;
   uint8_t sprite_height : 1;
   uint8_t bg_pattern_addr : 1;
@@ -35,3 +41,15 @@ static struct
   uint8_t increment_mode : 1;
   uint8_t nametbl_addr : 2;
 } CTRL;
+
+static struct
+{
+  uint8_t emph_blue : 1;
+  uint8_t emph_green : 1;
+  uint8_t emph_red : 1;
+  uint8_t sprite_enbl : 1;
+  uint8_t bg_enbl : 1;
+  uint8_t sprite_lcol : 1;
+  uint8_t bg_lcol : 1;
+  uint8_t grayscale : 1;
+} MASK;
