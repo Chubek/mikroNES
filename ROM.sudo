@@ -1,0 +1,255 @@
+############################################################
+#  NES CARTRIDGE / MAPPER SYSTEM                           #
+#  LITERATE, IMPERATIVE PSEUDO-CODE                        #
+############################################################
+
+########################################
+# SECTION 0 — NUMERIC & BIT CONVENTIONS
+########################################
+
+CONST ADDR_PRG_ROM_START = 0x8000
+CONST ADDR_PRG_ROM_END   = 0xFFFF
+CONST ADDR_CHR_ROM_START = 0x0000
+CONST ADDR_CHR_ROM_END   = 0x1FFF
+
+CONST MAPPER_NROM = 0
+CONST MAPPER_MMC1 = 1
+CONST MAPPER_UNROM = 2
+CONST MAPPER_CNROM = 3
+# Add more as needed
+
+######################################
+# SECTION 1 — CARTRIDGE STRUCTURE
+######################################
+
+STRUCT Cartridge:
+    prg_rom_size : u32
+    chr_rom_size : u32
+    prg_ram_size : u32
+    mapper_id    : u8
+    mirror_type  : u8  # 0 = horizontal, 1 = vertical
+    has_battery  : bool
+    has_trainer  : bool
+
+    prg_rom      : ARRAY[0..0x400000] OF u8  # up to 4MB
+    chr_rom      : ARRAY[0..0x200000] OF u8  # up to 2MB
+    prg_ram      : ARRAY[0..0x2000] OF u8    # 8KB default
+
+    mapper       : MapperInterface
+END
+
+STRUCT MapperInterface:
+    # Function pointers or handlers
+    write_register : FUNCTION(addr: u16, value: u8)
+    read_register  : FUNCTION(addr: u16) RETURNS u8
+    step           : FUNCTION()  # optional per-cycle logic
+END
+
+######################################
+# SECTION 2 — MAPPER FACTORY
+######################################
+
+FUNCTION CREATE_MAPPER(cart: Cartridge) RETURNS MapperInterface:
+    SWITCH cart.mapper_id:
+        CASE MAPPER_NROM:
+            RETURN CREATE_MAPPER_NROM(cart)
+        CASE MAPPER_MMC1:
+            RETURN CREATE_MAPPER_MMC1(cart)
+        DEFAULT:
+            ABORT("Unsupported mapper ID: " + cart.mapper_id)
+    END
+END
+
+######################################
+# SECTION 3 — NROM (MAPPER 0)
+######################################
+
+STRUCT MapperNROM:
+    cart : Cartridge
+END
+
+FUNCTION CREATE_MAPPER_NROM(cart: Cartridge) RETURNS MapperInterface:
+    mapper := MapperNROM(cart: cart)
+    RETURN MapperInterface(
+        write_register: NROM_WRITE,
+        read_register: NROM_READ,
+        step: NULL
+    )
+END
+
+FUNCTION NROM_READ(mapper: MapperNROM, addr: u16) RETURNS u8:
+    IF addr >= 0x8000 AND addr <= 0xFFFF:
+        # NROM has 16KB or 32KB PRG ROM
+        offset := addr - 0x8000
+        IF mapper.cart.prg_rom_size == 0x4000:  # 16KB
+            offset := offset MOD 0x4000
+        END
+        RETURN mapper.cart.prg_rom[offset]
+    ELIF addr >= 0x6000 AND addr <= 0x7FFF:
+        RETURN mapper.cart.prg_ram[addr - 0x6000]
+    ELSE:
+        RETURN 0
+    END
+END
+
+FUNCTION NROM_WRITE(mapper: MapperNROM, addr: u16, value: u8):
+    IF addr >= 0x6000 AND addr <= 0x7FFF:
+        mapper.cart.prg_ram[addr - 0x6000] := value
+    END
+    # Writes to PRG ROM area are ignored
+END
+
+######################################
+# SECTION 4 — MMC1 (MAPPER 1)
+######################################
+
+STRUCT MapperMMC1:
+    cart : Cartridge
+    shift_register : u8
+    control : u8
+    chr_bank0 : u8
+    chr_bank1 : u8
+    prg_bank : u8
+    write_count : u8
+END
+
+FUNCTION CREATE_MAPPER_MMC1(cart: Cartridge) RETURNS MapperInterface:
+    mapper := MapperMMC1(
+        cart: cart,
+        shift_register: 0x10,
+        control: 0x0C,
+        chr_bank0: 0,
+        chr_bank1: 0,
+        prg_bank: 0,
+        write_count: 0
+    )
+    RETURN MapperInterface(
+        write_register: MMC1_WRITE,
+        read_register: MMC1_READ,
+        step: NULL
+    )
+END
+
+FUNCTION MMC1_WRITE(mapper: MapperMMC1, addr: u16, value: u8):
+    IF (value AND 0x80) != 0:
+        mapper.shift_register := 0x10
+        mapper.write_count := 0
+        mapper.control := mapper.control OR 0x0C
+        RETURN
+    END
+
+    IF addr >= 0x8000 AND addr <= 0xFFFF:
+        IF (mapper.shift_register AND 1) != 0:
+            mapper.shift_register := (mapper.shift_register >> 1) OR ((value AND 1) << 4)
+        ELSE:
+            mapper.shift_register := mapper.shift_register >> 1
+        END
+
+        mapper.write_count := mapper.write_count + 1
+
+        IF mapper.write_count == 5:
+            register := (addr >> 13) AND 3
+            final_value := mapper.shift_register AND 0x1F
+            mapper.shift_register := 0x10
+            mapper.write_count := 0
+
+            SWITCH register:
+                CASE 0:  # Control
+                    mapper.control := final_value
+                CASE 1:  # CHR bank 0
+                    mapper.chr_bank0 := final_value
+                CASE 2:  # CHR bank 1
+                    mapper.chr_bank1 := final_value
+                CASE 3:  # PRG bank
+                    mapper.prg_bank := final_value
+            END
+        END
+    END
+END
+
+FUNCTION MMC1_READ(mapper: MapperMMC1, addr: u16) RETURNS u8:
+    IF addr >= 0x8000 AND addr <= 0xFFFF:
+        bank_mode := (mapper.control >> 2) AND 3
+        bank_select := mapper.prg_bank AND 0x0F
+
+        SWITCH bank_mode:
+            CASE 0: CASE 1:  # 32KB mode
+                bank := (bank_select >> 1) AND 0x07
+                offset := addr - 0x8000
+                RETURN mapper.cart.prg_rom[(bank * 0x8000) + offset]
+            CASE 2:  # First bank fixed at $8000
+                IF addr < 0xC000:
+                    RETURN mapper.cart.prg_rom[addr - 0x8000]
+                ELSE:
+                    offset := addr - 0xC000
+                    RETURN mapper.cart.prg_rom[(bank_select * 0x4000) + offset]
+                END
+            CASE 3:  # Last bank fixed at $C000
+                IF addr < 0xC000:
+                    offset := addr - 0x8000
+                    RETURN mapper.cart.prg_rom[(bank_select * 0x4000) + offset]
+                ELSE:
+                    last_bank := (mapper.cart.prg_rom_size / 0x4000) - 1
+                    offset := addr - 0xC000
+                    RETURN mapper.cart.prg_rom[(last_bank * 0x4000) + offset]
+                END
+        END
+    ELIF addr >= 0x6000 AND addr <= 0x7FFF:
+        RETURN mapper.cart.prg_ram[addr - 0x6000]
+    ELSE:
+        RETURN 0
+    END
+END
+
+######################################
+# SECTION 5 — CARTRIDGE LOADER
+######################################
+
+FUNCTION LOAD_CARTRIDGE(filename: string) RETURNS Cartridge:
+    file := OPEN_FILE(filename)
+    header := READ_HEADER(file)
+
+    cart := Cartridge(
+        prg_rom_size: header.prg_rom_size * 0x4000,
+        chr_rom_size: header.chr_rom_size * 0x2000,
+        prg_ram_size: header.prg_ram_size,
+        mapper_id: header.mapper_id,
+        mirror_type: header.mirror_type,
+        has_battery: header.has_battery,
+        has_trainer: header.has_trainer
+    )
+
+    IF cart.has_trainer:
+        SKIP_TRAINER(file)
+    END
+
+    READ_FILE(file, cart.prg_rom, cart.prg_rom_size)
+    READ_FILE(file, cart.chr_rom, cart.chr_rom_size)
+
+    cart.mapper := CREATE_MAPPER(cart)
+
+    RETURN cart
+END
+
+######################################
+# SECTION 6 — MEMORY ACCESS INTEGRATION
+######################################
+
+FUNCTION READ_CARTRIDGE_MEMORY(cart: Cartridge, addr: u16) RETURNS u8:
+    RETURN cart.mapper.read_register(cart.mapper, addr)
+END
+
+FUNCTION WRITE_CARTRIDGE_MEMORY(cart: Cartridge, addr: u16, value: u8):
+    cart.mapper.write_register(cart.mapper, addr, value)
+END
+
+######################################
+# SECTION 7 — MAPPER STEP (FOR IRQs, etc.)
+######################################
+
+FUNCTION STEP_MAPPER(cart: Cartridge):
+    IF cart.mapper.step != NULL:
+        cart.mapper.step(cart.mapper)
+    END
+END
+
