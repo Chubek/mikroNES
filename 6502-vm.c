@@ -142,14 +142,14 @@ static struct
 static inline uint8_t
 cpu_mem_read_byte (uint16_t addr)
 {
-  addr = wrapadde_fn (addr);
+  addr = MEMORY.wrapaddr_fn (addr);
   return MEMORY.contents[addr];
 }
 
 static inline void
 cpu_mem_write_byte (uint16_t addr, uint8_t val)
 {
-  addr = wrapaddr_fn (addr);
+  addr = MEMORY.wrapaddr_fn (addr);
   MEMORY.contents[addr] = val;
 }
 
