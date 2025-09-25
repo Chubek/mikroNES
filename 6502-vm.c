@@ -789,17 +789,17 @@ cpu_helper_cmp (uint8_t reg_val, uint8_t operand)
   cpu_flag_toggle_zn ((uint8_t)(diff & MASK_BYTE));
 }
 
-static uint8_t
-cpu_helper_branch (bool cond, uint16_t target)
+static void
+cpu_helper_branch (bool cond)
 {
   if (!cond)
-    return 0;
+    return;
   MEMORY.base_page = GET_PAGE (CPU.PC);
-  CPU.PC = target;
-  if (GET_PAGE (target) != MEMORY.base_page)
-    return 2;
+  CPU.PC = OPERAND.word;
+  if (ADDR.page_crossed)
+    CPU.total_cycles += 2;
   else
-    return 1;
+    CPU.total_cycles += 1;
 }
 
 // Interrupt Handlers
@@ -860,5 +860,3 @@ cpu_dispatch_table (uint8_t opcode)
 	   return;
     }
 }
-
-
