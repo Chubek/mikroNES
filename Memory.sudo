@@ -1,0 +1,605 @@
+# Memory.sudo - NES Memory Management and Mapper Interface
+# Handles CPU/PPU memory mapping, cartridge loading, and mapper support
+
+IMPORT CPU
+IMPORT PPU
+IMPORT APU
+IMPORT Input
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+# Memory sizes
+CONST RAM_SIZE: u16 = 0x0800      # 2KB internal RAM
+CONST PPU_REG_SIZE: u16 = 0x0008  # 8 PPU registers
+CONST APU_IO_SIZE: u16 = 0x0020   # APU and I/O registers
+CONST CART_SIZE: u32 = 0x8000     # Cartridge space (32KB)
+
+# Memory regions
+CONST RAM_START: u16 = 0x0000
+CONST RAM_END: u16 = 0x1FFF
+CONST PPU_REG_START: u16 = 0x2000
+CONST PPU_REG_END: u16 = 0x3FFF
+CONST APU_IO_START: u16 = 0x4000
+CONST APU_IO_END: u16 = 0x401F
+CONST CART_SPACE_START: u16 = 0x4020
+CONST CART_SPACE_END: u16 = 0x5FFF
+CONST SRAM_START: u16 = 0x6000
+CONST SRAM_END: u16 = 0x7FFF
+CONST PRG_ROM_START: u16 = 0x8000
+CONST PRG_ROM_END: u16 = 0xFFFF
+
+# PPU memory regions
+CONST CHR_SIZE: u16 = 0x2000      # 8KB CHR space
+CONST NAMETABLE_SIZE: u16 = 0x1000 # 4KB for nametables
+CONST PALETTE_START: u16 = 0x3F00
+
+# Mirroring types
+CONST MIRROR_HORIZONTAL: u8 = 0
+CONST MIRROR_VERTICAL: u8 = 1
+CONST MIRROR_SINGLE_0: u8 = 2
+CONST MIRROR_SINGLE_1: u8 = 3
+CONST MIRROR_FOUR_SCREEN: u8 = 4
+
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
+STRUCT CartridgeHeader
+    magic: ARRAY[4] OF u8      # "NES\x1A"
+    prg_rom_banks: u8          # 16KB units
+    chr_rom_banks: u8          # 8KB units (0 = CHR RAM)
+    mapper_low: u8             # Mapper, mirroring, battery, trainer
+    mapper_high: u8            # Mapper, VS/Playchoice, NES 2.0
+    prg_ram_size: u8           # 8KB units (rarely used)
+    tv_system: u8              # NTSC/PAL
+    tv_system_2: u8            # Rarely used
+    padding: ARRAY[5] OF u8    # Should be zeros
+END
+
+STRUCT Cartridge
+    header: CartridgeHeader
+    
+    # ROM/RAM data
+    prg_rom: PTR[ARRAY OF u8]
+    prg_rom_size: u32
+    chr_rom: PTR[ARRAY OF u8]
+    chr_rom_size: u32
+    prg_ram: ARRAY[0x2000] OF u8  # 8KB Save RAM
+    chr_ram: ARRAY[0x2000] OF u8  # 8KB CHR RAM
+    
+    # Mapper info
+    mapper_number: u16
+    uses_chr_ram: bool
+    has_battery: bool
+    mirroring: u8
+END
+
+# Base mapper interface
+STRUCT Mapper
+    cart: PTR[Cartridge]
+    
+    # Function pointers for mapper behavior
+    cpu_read: PTR[FUNCTION(mapper: PTR[Mapper], addr: u16) -> u8]
+    cpu_write: PTR[FUNCTION(mapper: PTR[Mapper], addr: u16, value: u8)]
+    ppu_read: PTR[FUNCTION(mapper: PTR[Mapper], addr: u16) -> u8]
+    ppu_write: PTR[FUNCTION(mapper: PTR[Mapper], addr: u16, value: u8)]
+    step: PTR[FUNCTION(mapper: PTR[Mapper])]  # For scanline counting, etc.
+END
+
+# Mapper 0 (NROM) - No banking
+STRUCT Mapper0
+    base: Mapper
+    prg_mask: u16
+END
+
+STRUCT MemoryBus
+    # RAM
+    ram: ARRAY[RAM_SIZE] OF u8
+    
+    # PPU VRAM
+    vram: ARRAY[NAMETABLE_SIZE] OF u8
+    
+    # Connected components
+    cpu: PTR[CPU.CPU]
+    ppu: PTR[PPU.PPU]
+    apu: PTR[APU.APU]
+    input: PTR[Input.InputSystem]
+    
+    # Cartridge and mapper
+    cart: PTR[Cartridge]
+    mapper: PTR[Mapper]
+    
+    # DMA state
+    oam_dma_page: u8
+    oam_dma_pending: bool
+    dmc_dma_pending: bool
+    dmc_dma_address: u16
+END
+
+# ============================================================================
+# CARTRIDGE LOADING
+# ============================================================================
+
+FUNCTION load_cartridge(data: PTR[ARRAY OF u8], size: u32) -> PTR[Cartridge]
+    VAR cart: PTR[Cartridge] = ALLOCATE[Cartridge]
+    
+    # Read header
+    MEMCOPY(&cart.header, data, SIZEOF(CartridgeHeader))
+    
+    # Verify magic
+    IF cart.header.magic[0] != 'N' OR cart.header.magic[1] != 'E' OR 
+       cart.header.magic[2] != 'S' OR cart.header.magic[3] != 0x1A THEN
+        FREE(cart)
+        RETURN NULL
+    END
+    
+    # Calculate sizes
+    cart.prg_rom_size = CAST(u32, cart.header.prg_rom_banks) * 16384
+    cart.chr_rom_size = CAST(u32, cart.header.chr_rom_banks) * 8192
+    
+    # Extract mapper number
+    cart.mapper_number = (cart.header.mapper_high AND 0xF0) OR (cart.header.mapper_low >> 4)
+    
+    # Mirroring
+    IF (cart.header.mapper_low AND 0x08) != 0 THEN
+        cart.mirroring = MIRROR_FOUR_SCREEN
+    ELSE IF (cart.header.mapper_low AND 0x01) != 0 THEN
+        cart.mirroring = MIRROR_VERTICAL
+    ELSE
+        cart.mirroring = MIRROR_HORIZONTAL
+    END
+    
+    # Battery backup
+    cart.has_battery = (cart.header.mapper_low AND 0x02) != 0
+    
+    # Skip trainer if present
+    VAR offset: u32 = SIZEOF(CartridgeHeader)
+    IF (cart.header.mapper_low AND 0x04) != 0 THEN
+        offset = offset + 512
+    END
+    
+    # Load PRG ROM
+    cart.prg_rom = ALLOCATE[ARRAY OF u8](cart.prg_rom_size)
+    MEMCOPY(cart.prg_rom, data + offset, cart.prg_rom_size)
+    offset = offset + cart.prg_rom_size
+    
+    # Load CHR ROM or use CHR RAM
+    IF cart.chr_rom_size > 0 THEN
+        cart.chr_rom = ALLOCATE[ARRAY OF u8](cart.chr_rom_size)
+        MEMCOPY(cart.chr_rom, data + offset, cart.chr_rom_size)
+        cart.uses_chr_ram = false
+    ELSE
+        cart.uses_chr_ram = true
+        # Initialize CHR RAM to zero
+        VAR i: u16 = 0
+        WHILE i < 0x2000 DO
+            cart.chr_ram[i] = 0
+            i = i + 1
+        END
+    END
+    
+    # Initialize PRG RAM
+    VAR i: u16 = 0
+    WHILE i < 0x2000 DO
+        cart.prg_ram[i] = 0
+        i = i + 1
+    END
+    
+    RETURN cart
+END
+
+FUNCTION free_cartridge(cart: PTR[Cartridge])
+    IF cart != NULL THEN
+        IF cart.prg_rom != NULL THEN
+            FREE(cart.prg_rom)
+        END
+        IF cart.chr_rom != NULL THEN
+            FREE(cart.chr_rom)
+        END
+        FREE(cart)
+    END
+END
+
+# ============================================================================
+# MAPPER IMPLEMENTATIONS
+# ============================================================================
+
+# Mapper 0 (NROM) implementation
+FUNCTION mapper0_cpu_read(mapper: PTR[Mapper], addr: u16) -> u8
+    VAR m0: PTR[Mapper0] = CAST[PTR[Mapper0]](mapper)
+    VAR cart: PTR[Cartridge] = m0.base.cart
+    
+    IF addr >= 0x6000 AND addr <= 0x7FFF THEN
+        # PRG RAM
+        RETURN cart.prg_ram[addr - 0x6000]
+    ELSE IF addr >= 0x8000 THEN
+        # PRG ROM with mirroring
+        VAR offset: u16 = addr - 0x8000
+        RETURN cart.prg_rom[offset AND m0.prg_mask]
+    END
+    
+    RETURN 0
+END
+
+FUNCTION mapper0_cpu_write(mapper: PTR[Mapper], addr: u16, value: u8)
+    VAR m0: PTR[Mapper0] = CAST[PTR[Mapper0]](mapper)
+    VAR cart: PTR[Cartridge] = m0.base.cart
+    
+    IF addr >= 0x6000 AND addr <= 0x7FFF THEN
+        # PRG RAM
+        cart.prg_ram[addr - 0x6000] = value
+    END
+    # PRG ROM writes are ignored
+END
+
+FUNCTION mapper0_ppu_read(mapper: PTR[Mapper], addr: u16) -> u8
+    VAR m0: PTR[Mapper0] = CAST[PTR[Mapper0]](mapper)
+    VAR cart: PTR[Cartridge] = m0.base.cart
+    
+    IF addr < 0x2000 THEN
+        IF cart.uses_chr_ram THEN
+            RETURN cart.chr_ram[addr]
+        ELSE
+            RETURN cart.chr_rom[addr]
+        END
+    END
+    
+    RETURN 0
+END
+
+FUNCTION mapper0_ppu_write(mapper: PTR[Mapper], addr: u16, value: u8)
+    VAR m0: PTR[Mapper0] = CAST[PTR[Mapper0]](mapper)
+    VAR cart: PTR[Cartridge] = m0.base.cart
+    
+    IF addr < 0x2000 AND cart.uses_chr_ram THEN
+        cart.chr_ram[addr] = value
+    END
+END
+
+FUNCTION mapper0_step(mapper: PTR[Mapper])
+    # Mapper 0 has no scanline counter or IRQ
+END
+
+FUNCTION create_mapper(cart: PTR[Cartridge]) -> PTR[Mapper]
+    SWITCH cart.mapper_number
+        CASE 0:
+            VAR m0: PTR[Mapper0] = ALLOCATE[Mapper0]
+            m0.base.cart = cart
+            m0.base.cpu_read = mapper0_cpu_read
+            m0.base.cpu_write = mapper0_cpu_write
+            m0.base.ppu_read = mapper0_ppu_read
+            m0.base.ppu_write = mapper0_ppu_write
+            m0.base.step = mapper0_step
+            
+            # Calculate PRG ROM mask for mirroring
+            IF cart.prg_rom_size <= 16384 THEN
+                m0.prg_mask = 0x3FFF  # Mirror 16KB
+            ELSE
+                m0.prg_mask = 0x7FFF  # Full 32KB
+            END
+            
+            RETURN CAST[PTR[Mapper]](m0)
+        
+        DEFAULT:
+            # Unsupported mapper
+            RETURN NULL
+    END
+END
+
+# ============================================================================
+# MEMORY BUS IMPLEMENTATION
+# ============================================================================
+
+FUNCTION memory_create() -> PTR[MemoryBus]
+    VAR mem: PTR[MemoryBus] = ALLOCATE[MemoryBus]
+    
+    # Initialize RAM
+    VAR i: u16 = 0
+    WHILE i < RAM_SIZE DO
+        mem.ram[i] = 0
+        i = i + 1
+    END
+    
+    # Initialize VRAM
+    i = 0
+    WHILE i < NAMETABLE_SIZE DO
+        mem.vram[i] = 0
+        i = i + 1
+    END
+    
+    mem.oam_dma_pending = false
+    mem.dmc_dma_pending = false
+    
+    RETURN mem
+END
+
+FUNCTION memory_connect_components(mem: PTR[MemoryBus], cpu: PTR[CPU.CPU], 
+                                  ppu: PTR[PPU.PPU], apu: PTR[APU.APU], 
+                                  input: PTR[Input.InputSystem])
+    mem.cpu = cpu
+    mem.ppu = ppu
+    mem.apu = apu
+    mem.input = input
+END
+
+FUNCTION memory_load_cartridge(mem: PTR[MemoryBus], cart: PTR[Cartridge]) -> bool
+    mem.cart = cart
+    mem.mapper = create_mapper(cart)
+    RETURN mem.mapper != NULL
+END
+
+# ============================================================================
+# CPU MEMORY ACCESS
+# ============================================================================
+
+FUNCTION cpu_read_byte(mem: PTR[MemoryBus], addr: u16) -> u8
+    IF addr < 0x2000 THEN
+        # Internal RAM with mirroring
+        RETURN mem.ram[addr AND 0x07FF]
+        
+    ELSE IF addr < 0x4000 THEN
+        # PPU registers with mirroring
+        RETURN PPU.ppu_read_register(mem.ppu, 0x2000 + (addr AND 0x0007))
+        
+    ELSE IF addr == 0x4014 THEN
+        # OAM DMA register (write-only)
+        RETURN 0
+        
+    ELSE IF addr == 0x4015 THEN
+        # APU status
+        RETURN APU.apu_read_status(mem.apu)
+        
+    ELSE IF addr == 0x4016 THEN
+        # Controller 1
+        RETURN Input.read_controller_1(mem.input)
+        
+    ELSE IF addr == 0x4017 THEN
+        # Controller 2
+        RETURN Input.read_controller_2(mem.input)
+        
+    ELSE IF addr < 0x4018 THEN
+        # APU registers
+        RETURN 0  # Most APU registers are write-only
+        
+    ELSE IF addr >= 0x4020 THEN
+        # Cartridge space
+        IF mem.mapper != NULL THEN
+            RETURN mem.mapper.cpu_read(mem.mapper, addr)
+        END
+    END
+    
+    # Open bus behavior
+    RETURN 0
+END
+
+FUNCTION cpu_write_byte(mem: PTR[MemoryBus], addr: u16, value: u8)
+    IF addr < 0x2000 THEN
+        # Internal RAM with mirroring
+        mem.ram[addr AND 0x07FF] = value
+        
+    ELSE IF addr < 0x4000 THEN
+        # PPU registers with mirroring
+        PPU.ppu_write_register(mem.ppu, 0x2000 + (addr AND 0x0007), value)
+        
+    ELSE IF addr == 0x4014 THEN
+        # OAM DMA
+        mem.oam_dma_page = value
+        mem.oam_dma_pending = true
+        
+    ELSE IF addr >= 0x4000 AND addr <= 0x4013 THEN
+        # APU registers
+        APU.apu_write_register(mem.apu, addr, value)
+        
+    ELSE IF addr == 0x4015 THEN
+        # APU control
+        APU.apu_write_control(mem.apu, value)
+        
+    ELSE IF addr == 0x4016 THEN
+        # Controller strobe
+        Input.write_controller(mem.input, value)
+        
+    ELSE IF addr == 0x4017 THEN
+        # APU frame counter
+        APU.apu_write_frame_counter(mem.apu, value)
+        
+    ELSE IF addr >= 0x4020 THEN
+        # Cartridge space
+        IF mem.mapper != NULL THEN
+            mem.mapper.cpu_write(mem.mapper, addr, value)
+        END
+    END
+END
+
+FUNCTION cpu_read_word(mem: PTR[MemoryBus], addr: u16) -> u16
+    VAR low: u8 = cpu_read_byte(mem, addr)
+    VAR high: u8 = cpu_read_byte(mem, addr + 1)
+    RETURN (CAST(u16, high) << 8) OR CAST(u16, low)
+END
+
+FUNCTION cpu_read_word_bug(mem: PTR[MemoryBus], addr: u16) -> u16
+    # 6502 bug: JMP indirect doesn't cross page boundaries correctly
+    VAR low: u8 = cpu_read_byte(mem, addr)
+    VAR high_addr: u16 = addr + 1
+    IF (addr AND 0xFF) == 0xFF THEN
+        high_addr = addr AND 0xFF00  # Wrap within page
+    END
+    VAR high: u8 = cpu_read_byte(mem, high_addr)
+    RETURN (CAST(u16, high) << 8) OR CAST(u16, low)
+END
+
+# ============================================================================
+# PPU MEMORY ACCESS
+# ============================================================================
+
+FUNCTION get_mirrored_address(mem: PTR[MemoryBus], addr: u16) -> u16
+    # Nametable mirroring
+    VAR nametable: u16 = (addr - 0x2000) / 0x0400
+    VAR offset: u16 = (addr - 0x2000) MOD 0x0400
+    
+    SWITCH mem.cart.mirroring
+        CASE MIRROR_HORIZONTAL:
+            # 0, 0, 1, 1
+            IF nametable == 2 OR nametable == 3 THEN
+                RETURN 0x0400 + offset
+            ELSE
+                RETURN offset
+            END
+            
+        CASE MIRROR_VERTICAL:
+            # 0, 1, 0, 1
+            IF nametable == 1 OR nametable == 3 THEN
+                RETURN 0x0400 + offset
+            ELSE
+                RETURN offset
+            END
+            
+        CASE MIRROR_SINGLE_0:
+            # 0, 0, 0, 0
+            RETURN offset
+            
+        CASE MIRROR_SINGLE_1:
+            # 1, 1, 1, 1
+            RETURN 0x0400 + offset
+            
+        CASE MIRROR_FOUR_SCREEN:
+            # 0, 1, 2, 3 (no mirroring)
+            RETURN nametable * 0x0400 + offset
+    END
+    
+    RETURN offset
+END
+
+FUNCTION ppu_read_byte(mem: PTR[MemoryBus], addr: u16) -> u8
+    VAR mapped_addr: u16 = addr AND 0x3FFF
+    
+    IF mapped_addr < 0x2000 THEN
+        # Pattern tables (CHR ROM/RAM)
+        IF mem.mapper != NULL THEN
+            RETURN mem.mapper.ppu_read(mem.mapper, mapped_addr)
+        END
+        
+    ELSE IF mapped_addr < 0x3F00 THEN
+        # Nametables
+        VAR vram_addr: u16 = get_mirrored_address(mem, mapped_addr)
+        RETURN mem.vram[vram_addr]
+    END
+    
+    # Palette handled by PPU internally
+    RETURN 0
+END
+
+FUNCTION ppu_write_byte(mem: PTR[MemoryBus], addr: u16, value: u8)
+    VAR mapped_addr: u16 = addr AND 0x3FFF
+    
+    IF mapped_addr < 0x2000 THEN
+        # Pattern tables (CHR ROM/RAM)
+        IF mem.mapper != NULL THEN
+            mem.mapper.ppu_write(mem.mapper, mapped_addr, value)
+        END
+        
+    ELSE IF mapped_addr < 0x3F00 THEN
+        # Nametables
+        VAR vram_addr: u16 = get_mirrored_address(mem, mapped_addr)
+        mem.vram[vram_addr] = value
+    END
+    
+    # Palette handled by PPU internally
+END
+
+# ============================================================================
+# DMA HANDLING
+# ============================================================================
+
+FUNCTION perform_oam_dma(mem: PTR[MemoryBus]) -> u16
+    # OAM DMA takes 513 or 514 cycles
+    VAR base_addr: u16 = CAST(u16, mem.oam_dma_page) << 8
+    VAR i: u16 = 0
+    
+    # Copy 256 bytes from CPU memory to OAM
+    WHILE i < 256 DO
+        VAR data: u8 = cpu_read_byte(mem, base_addr + i)
+        PPU.ppu_write_register(mem.ppu, OAMDATA, data)
+        i = i + 1
+    END
+    
+    mem.oam_dma_pending = false
+    
+    # Return cycle cost (513 + 1 if on odd cycle)
+    RETURN 513
+END
+
+FUNCTION check_dma_pending(mem: PTR[MemoryBus]) -> bool
+    RETURN mem.oam_dma_pending OR mem.dmc_dma_pending
+END
+
+FUNCTION memory_step(mem: PTR[MemoryBus])
+    # Update mapper if it has scanline counting
+    IF mem.mapper != NULL AND mem.mapper.step != NULL THEN
+        mem.mapper.step(mem.mapper)
+    END
+END
+
+# ============================================================================
+# DEBUG HELPERS
+# ============================================================================
+
+FUNCTION memory_dump_ram(mem: PTR[MemoryBus], start: u16, length: u16) -> ARRAY OF u8
+    VAR data: ARRAY[length] OF u8
+    VAR i: u16 = 0
+    
+    WHILE i < length DO
+        data[i] = cpu_read_byte(mem, start + i)
+        i = i + 1
+    END
+    
+    RETURN data
+END
+
+FUNCTION memory_get_mapper_name(mem: PTR[MemoryBus]) -> STRING
+    IF mem.cart == NULL THEN
+        RETURN "No cartridge"
+    END
+    
+    SWITCH mem.cart.mapper_number
+        CASE 0:
+            RETURN "NROM"
+        CASE 1:
+            RETURN "MMC1"
+        CASE 2:
+            RETURN "UxROM"
+        CASE 3:
+            RETURN "CNROM"
+        CASE 4:
+            RETURN "MMC3"
+        DEFAULT:
+            RETURN "Unknown mapper " + TO_STRING(mem.cart.mapper_number)
+    END
+END
+
+FUNCTION memory_save_sram(mem: PTR[MemoryBus], filename: STRING) -> bool
+    IF mem.cart == NULL OR NOT mem.cart.has_battery THEN
+        RETURN false
+    END
+    
+    # Save PRG RAM to file
+    RETURN WRITE_FILE(filename, mem.cart.prg_ram, 0x2000)
+END
+
+FUNCTION memory_load_sram(mem: PTR[MemoryBus], filename: STRING) -> bool
+    IF mem.cart == NULL OR NOT mem.cart.has_battery THEN
+        RETURN false
+    END
+    
+    # Load PRG RAM from file
+    VAR data: PTR[ARRAY OF u8] = READ_FILE(filename)
+    IF data != NULL THEN
+        MEMCOPY(mem.cart.prg_ram, data, 0x2000)
+        FREE(data)
+        RETURN true
+    END
+    
+    RETURN false
+END
+

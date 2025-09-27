@@ -1,0 +1,881 @@
+// NES.sudo - Main NES System Module
+// Integrates all components and manages emulation
+
+INCLUDE "CPU.sudo"
+INCLUDE "PPU.sudo"
+INCLUDE "APU.sudo"
+INCLUDE "Memory.sudo"
+INCLUDE "Input.sudo"
+INCLUDE "Cartridge.sudo"
+INCLUDE "ROM.sudo"
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// NTSC timing constants
+CONST NTSC_CPU_FREQUENCY = 1789773         // ~1.79 MHz
+CONST NTSC_PPU_FREQUENCY = 5369318         // ~5.37 MHz (3x CPU)
+CONST NTSC_MASTER_FREQUENCY = 21477272     // ~21.48 MHz
+
+// PAL timing constants  
+CONST PAL_CPU_FREQUENCY = 1662607          // ~1.66 MHz
+CONST PAL_PPU_FREQUENCY = 5320342          // ~5.32 MHz
+CONST PAL_MASTER_FREQUENCY = 26601712      // ~26.60 MHz
+
+// Dendy timing constants
+CONST DENDY_CPU_FREQUENCY = 1773448        // ~1.77 MHz
+CONST DENDY_PPU_FREQUENCY = 5320342        // ~5.32 MHz  
+
+// Frame timing
+CONST NTSC_SCANLINES_PER_FRAME = 262
+CONST PAL_SCANLINES_PER_FRAME = 312
+CONST DENDY_SCANLINES_PER_FRAME = 312
+
+// CPU/PPU clock ratios
+CONST PPU_CLOCKS_PER_CPU_CLOCK = 3
+
+// DMA cycles
+CONST OAM_DMA_CYCLES = 513  // 513 or 514 depending on odd/even CPU cycle
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+ENUM Region:
+    NTSC = 0
+    PAL = 1
+    DENDY = 2
+    MULTI = 3
+END
+
+ENUM EmulatorState:
+    UNINITIALIZED = 0
+    INITIALIZED = 1
+    RUNNING = 2
+    PAUSED = 3
+    STOPPED = 4
+    ERROR = 5
+END
+
+// Timing/synchronization info
+STRUCT Timing:
+    region: Region
+    cpu_frequency: u32
+    ppu_frequency: u32
+    master_frequency: u32
+    scanlines_per_frame: u16
+    
+    // Cycle counters
+    master_cycles: u64
+    cpu_cycles: u64
+    ppu_cycles: u64
+    
+    // Frame counters
+    frame_count: u64
+    scanline: u16
+    
+    // Synchronization
+    cpu_cycles_per_frame: u32
+    ppu_cycles_per_frame: u32
+    target_fps: f32
+    frame_time_ns: u64
+END
+
+// Main NES system structure
+STRUCT NES:
+    // Core components
+    cpu: CPU
+    ppu: PPU
+    apu: APU
+    memory: MemoryBus
+    cartridge: Cartridge*
+    input: InputSystem
+    
+    // System state
+    state: EmulatorState
+    timing: Timing
+    
+    // DMA state
+    oam_dma_active: bool
+    oam_dma_page: u8
+    oam_dma_offset: u8
+    oam_dma_cycles_left: u16
+    
+    // DMC DMA state
+    dmc_dma_active: bool
+    dmc_dma_addr: u16
+    dmc_dma_cycles_left: u8
+    
+    // Configuration
+    config: NESConfig
+    
+    // Callbacks
+    video_callback: FUNCTION(frame_buffer: u32[256*240])
+    audio_callback: FUNCTION(samples: f32[], count: u32)
+    input_callback: FUNCTION(port: u8) RETURNS u8
+    
+    // Debug/logging
+    trace_enabled: bool
+    break_on_illegal_opcode: bool
+    breakpoints: SET<u16>
+END
+
+STRUCT NESConfig:
+    region: Region
+    overscan_top: u8
+    overscan_bottom: u8
+    overscan_left: u8
+    overscan_right: u8
+    enable_audio: bool
+    enable_video: bool
+    ram_power_on_pattern: u8  // 0x00, 0xFF, or random
+    save_path: string
+    sram_auto_save: bool
+END
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+FUNCTION nes_create() RETURNS NES*:
+    nes := ALLOCATE(NES)
+    
+    // Initialize state
+    nes.state := UNINITIALIZED
+    nes.cartridge := NULL
+    nes.frame_count := 0
+    
+    // Default config
+    nes.config.region := NTSC
+    nes.config.overscan_top := 8
+    nes.config.overscan_bottom := 8
+    nes.config.overscan_left := 0
+    nes.config.overscan_right := 0
+    nes.config.enable_audio := true
+    nes.config.enable_video := true
+    nes.config.ram_power_on_pattern := 0x00
+    nes.config.sram_auto_save := true
+    
+    // Initialize timing based on region
+    nes_set_region(nes, NTSC)
+    
+    // Initialize components
+    cpu_init(&nes.cpu)
+    ppu_init(&nes.ppu)
+    apu_init(&nes.apu)
+    memory_init(&nes.memory)
+    input_init(&nes.input)
+    
+    // Wire up memory bus
+    nes_connect_bus(nes)
+    
+    nes.state := INITIALIZED
+    RETURN nes
+END
+
+FUNCTION nes_destroy(nes: NES*):
+    IF nes == NULL: RETURN
+    
+    // Save SRAM if needed
+    IF nes.cartridge != NULL AND nes.config.sram_auto_save:
+        nes_save_sram(nes)
+    END
+    
+    // Clean up cartridge
+    IF nes.cartridge != NULL:
+        cartridge_destroy(nes.cartridge)
+    END
+    
+    // Clean up components
+    apu_cleanup(&nes.apu)
+    ppu_cleanup(&nes.ppu)
+    
+    DEALLOCATE(nes)
+END
+
+// ============================================================================
+// MEMORY BUS CONNECTION
+// ============================================================================
+
+FUNCTION nes_connect_bus(nes: NES*):
+    // Connect CPU memory map
+    memory_set_read_handler(&nes.memory, 0x2000, 0x3FFF, 
+        LAMBDA(addr: u16) -> u8:
+            RETURN nes_ppu_read(nes, addr)
+        END)
+    
+    memory_set_write_handler(&nes.memory, 0x2000, 0x3FFF,
+        LAMBDA(addr: u16, value: u8):
+            nes_ppu_write(nes, addr, value)
+        END)
+    
+    // APU and I/O registers
+    memory_set_read_handler(&nes.memory, 0x4000, 0x4017,
+        LAMBDA(addr: u16) -> u8:
+            RETURN nes_apu_io_read(nes, addr)
+        END)
+        
+    memory_set_write_handler(&nes.memory, 0x4000, 0x4017,
+        LAMBDA(addr: u16, value: u8):
+            nes_apu_io_write(nes, addr, value)
+        END)
+    
+    // CPU test mode registers (usually open bus)
+    memory_set_read_handler(&nes.memory, 0x4018, 0x401F,
+        LAMBDA(addr: u16) -> u8:
+            RETURN 0xFF  // Open bus
+        END)
+END
+
+// ============================================================================
+// CARTRIDGE LOADING
+// ============================================================================
+
+FUNCTION nes_load_rom(nes: NES*, filename: string) RETURNS bool:
+    // Unload current cartridge if any
+    IF nes.cartridge != NULL:
+        nes_unload_rom(nes)
+    END
+    
+    // Load new ROM
+    rom := rom_load(filename)
+    IF rom == NULL:
+        nes.state := ERROR
+        RETURN false
+    END
+    
+    // Create cartridge from ROM
+    nes.cartridge := rom_create_cartridge(rom)
+    rom_unload_file(rom)
+    
+    IF nes.cartridge == NULL:
+        nes.state := ERROR
+        RETURN false
+    END
+    
+    // Connect cartridge to memory bus
+    cartridge_connect(&nes.memory, nes.cartridge)
+    
+    // Set region if ROM specifies it
+    IF nes.cartridge.timing != TIMING_MULTI_REGION:
+        nes_set_region(nes, nes.cartridge.timing)
+    END
+    
+    // Load SRAM if exists
+    IF nes.config.sram_auto_save:
+        nes_load_sram(nes)
+    END
+    
+    RETURN true
+END
+
+FUNCTION nes_unload_rom(nes: NES*):
+    IF nes.cartridge == NULL: RETURN
+    
+    // Save SRAM
+    IF nes.config.sram_auto_save:
+        nes_save_sram(nes)
+    END
+    
+    // Disconnect from bus
+    cartridge_disconnect(&nes.memory, nes.cartridge)
+    
+    // Destroy cartridge
+    cartridge_destroy(nes.cartridge)
+    nes.cartridge := NULL
+END
+
+// ============================================================================
+// SYSTEM CONTROL
+// ============================================================================
+
+FUNCTION nes_reset(nes: NES*):
+    IF nes.cartridge == NULL: RETURN
+    
+    // Reset timing
+    nes.timing.master_cycles := 0
+    nes.timing.cpu_cycles := 0
+    nes.timing.ppu_cycles := 0
+    nes.timing.frame_count := 0
+    nes.timing.scanline := 0
+    
+    // Reset DMA
+    nes.oam_dma_active := false
+    nes.dmc_dma_active := false
+    
+    // Reset components
+    cpu_reset(&nes.cpu)
+    ppu_reset(&nes.ppu)
+    apu_reset(&nes.apu)
+    cartridge_reset(nes.cartridge)
+    input_reset(&nes.input)
+    
+    // Initialize RAM pattern
+    FOR i := 0 TO 0x7FF:
+        value := nes.config.ram_power_on_pattern
+        IF value == 0xFF:
+            // Alternate 00/FF pattern every 4 bytes
+            value := ((i & 4) != 0) ? 0xFF : 0x00
+        END
+        memory_write(&nes.memory, i, value)
+    END
+    
+    nes.state := RUNNING
+END
+
+FUNCTION nes_power_on(nes: NES*):
+    // Full power cycle - clears more state than reset
+    nes_reset(nes)
+    
+    // Additional power-on initialization
+    apu_power_on(&nes.apu)
+    ppu_power_on(&nes.ppu)
+END
+
+// ============================================================================
+// MAIN EMULATION LOOP
+// ============================================================================
+
+FUNCTION nes_run_frame(nes: NES*):
+    IF nes.state != RUNNING OR nes.cartridge == NULL: RETURN
+    
+    start_frame := nes.timing.frame_count
+    target_scanlines := nes_get_scanlines_per_frame(nes)
+    
+    WHILE nes.timing.scanline < target_scanlines:
+        nes_run_scanline(nes)
+    END
+    
+    // Frame complete
+    nes.timing.frame_count += 1
+    nes.timing.scanline := 0
+    
+    // Deliver video frame
+    IF nes.video_callback != NULL AND nes.config.enable_video:
+        nes.video_callback(nes.ppu.frame_buffer)
+    END
+    
+    // Handle audio
+    IF nes.audio_callback != NULL AND nes.config.enable_audio:
+        samples, count := apu_get_samples(&nes.apu)
+        IF count > 0:
+            nes.audio_callback(samples, count)
+        END
+    END
+END
+
+FUNCTION nes_run_scanline(nes: NES*):
+    // PPU runs 341 cycles per scanline (or 340 on short scanline)
+    ppu_cycles_per_scanline := 341
+    
+    // Special case: short scanline on NTSC odd frames
+    IF nes.timing.region == NTSC AND 
+       nes.timing.scanline == 261 AND 
+       (nes.timing.frame_count & 1) == 1:
+        ppu_cycles_per_scanline := 340
+    END
+    
+    // Run one scanline worth of cycles
+    start_ppu_cycles := nes.timing.ppu_cycles
+    
+    WHILE (nes.timing.ppu_cycles - start_ppu_cycles) < ppu_cycles_per_scanline:
+        // Handle DMA if active
+        IF nes.oam_dma_active:
+            nes_run_oam_dma_cycle(nes)
+            CONTINUE
+        END
+        
+        IF nes.dmc_dma_active:
+            nes_run_dmc_dma_cycle(nes)
+            CONTINUE
+        END
+        
+        // Run CPU (1 CPU cycle = 3 PPU cycles)
+        IF (nes.timing.ppu_cycles % 3) == 0:
+            nes_run_cpu_cycle(nes)
+        END
+        
+        // Run PPU
+        nes_run_ppu_cycle(nes)
+        
+        // Run APU (runs at half CPU rate)
+        IF (nes.timing.ppu_cycles % 6) == 0:
+            apu_clock(&nes.apu)
+        END
+        
+        // Update cycle counters
+        nes.timing.ppu_cycles += 1
+        nes.timing.master_cycles += 4  // Master clock is 4x PPU
+    END
+    
+    nes.timing.scanline += 1
+END
+
+FUNCTION nes_run_cpu_cycle(nes: NES*):
+    // Check for interrupts
+    IF nes.cpu.pending_nmi OR 
+       (nes.cpu.pending_irq AND NOT cpu_get_flag(&nes.cpu, FLAG_I)):
+        cpu_handle_interrupt(&nes.cpu)
+    END
+    
+    // Execute instruction
+    cycles := cpu_step(&nes.cpu)
+    nes.timing.cpu_cycles += cycles
+    
+    // Clock mapper
+    IF nes.cartridge != NULL AND nes.cartridge.mapper != NULL:
+        mapper_cpu_cycle(nes.cartridge.mapper, cycles)
+    END
+END
+
+FUNCTION nes_run_ppu_cycle(nes: NES*):
+    // Clock PPU
+    nmi := ppu_clock(&nes.ppu)
+    
+    // Check for NMI
+    IF nmi:
+        cpu_set_nmi(&nes.cpu, true)
+    END
+    
+    // Clock mapper (for scanline counter)
+    IF nes.cartridge != NULL AND nes.cartridge.mapper != NULL:
+        mapper_ppu_cycle(nes.cartridge.mapper, nes.timing.scanline, 
+                        nes.ppu.cycle, nes.ppu.rendering_enabled)
+    END
+END
+
+// ============================================================================
+// DMA HANDLING
+// ============================================================================
+
+FUNCTION nes_run_oam_dma_cycle(nes: NES*):
+    IF nes.oam_dma_cycles_left > 0:
+        nes.oam_dma_cycles_left -= 1
+        
+        // On even cycles, read from CPU memory
+        // On odd cycles, write to PPU OAM
+        IF (nes.oam_dma_cycles_left & 1) == 0:
+            addr := (nes.oam_dma_page << 8) | nes.oam_dma_offset
+            value := memory_read(&nes.memory, addr)
+            ppu_write_oam(&nes.ppu, value)
+            
+            nes.oam_dma_offset += 1
+            IF nes.oam_dma_offset == 0:
+                // DMA complete
+                nes.oam_dma_active := false
+            END
+        END
+    END
+    
+    // Still consume PPU cycles
+    nes.timing.ppu_cycles += 3
+END
+
+FUNCTION nes_start_oam_dma(nes: NES*, page: u8):
+    nes.oam_dma_active := true
+    nes.oam_dma_page := page
+    nes.oam_dma_offset := 0
+    
+    // DMA takes 513 or 514 cycles depending on odd/even CPU cycle
+    nes.oam_dma_cycles_left := OAM_DMA_CYCLES
+    IF (nes.timing.cpu_cycles & 1) == 1:
+        nes.oam_dma_cycles_left += 1
+    END
+END
+
+FUNCTION nes_run_dmc_dma_cycle(nes: NES*):
+    IF nes.dmc_dma_cycles_left > 0:
+        nes.dmc_dma_cycles_left -= 1
+        
+        IF nes.dmc_dma_cycles_left == 0:
+            // Read byte for DMC
+            value := memory_read(&nes.memory, nes.dmc_dma_addr)
+            apu_dmc_dma_complete(&nes.apu, value)
+            nes.dmc_dma_active := false
+        END
+    END
+    
+    // Consume cycles
+    nes.timing.ppu_cycles += 3
+END
+
+FUNCTION nes_start_dmc_dma(nes: NES*, addr: u16):
+    nes.dmc_dma_active := true
+    nes.dmc_dma_addr := addr
+    nes.dmc_dma_cycles_left := 4  // DMC DMA takes 4 cycles
+END
+
+// ============================================================================
+// PPU/APU REGISTER HANDLERS
+// ============================================================================
+
+FUNCTION nes_ppu_read(nes: NES*, addr: u16) RETURNS u8:
+    register := addr & 0x07
+    RETURN ppu_read_register(&nes.ppu, register)
+END
+
+FUNCTION nes_ppu_write(nes: NES*, addr: u16, value: u8):
+    register := addr & 0x07
+    ppu_write_register(&nes.ppu, register, value)
+END
+
+FUNCTION nes_apu_io_read(nes: NES*, addr: u16) RETURNS u8:
+    SWITCH addr:
+        CASE 0x4015:
+            RETURN apu_read_status(&nes.apu)
+            
+        CASE 0x4016:
+            RETURN input_read(&nes.input, 0)
+            
+        CASE 0x4017:
+            RETURN input_read(&nes.input, 1)
+            
+        DEFAULT:
+            RETURN 0x40  // Open bus
+    END
+END
+
+FUNCTION nes_apu_io_write(nes: NES*, addr: u16, value: u8):
+    IF addr <= 0x4013 OR addr == 0x4015 OR addr == 0x4017:
+        apu_write_register(&nes.apu, addr, value)
+        
+        // Check for DMC DMA request
+        IF addr == 0x4015 AND (value & 0x10) != 0:
+            dma_addr := apu_get_dmc_addr(&nes.apu)
+            IF dma_addr != 0xFFFF:
+                nes_start_dmc_dma(nes, dma_addr)
+            END
+        END
+    ELSE IF addr == 0x4014:
+        // OAM DMA
+        nes_start_oam_dma(nes, value)
+    ELSE IF addr == 0x4016:
+        input_write(&nes.input, value)
+    END
+END
+
+// ============================================================================
+// TIMING CONFIGURATION
+// ============================================================================
+
+FUNCTION nes_set_region(nes: NES*, region: Region):
+    nes.timing.region := region
+    
+    SWITCH region:
+        CASE NTSC:
+            nes.timing.cpu_frequency := NTSC_CPU_FREQUENCY
+            nes.timing.ppu_frequency := NTSC_PPU_FREQUENCY
+            nes.timing.master_frequency := NTSC_MASTER_FREQUENCY
+            nes.timing.scanlines_per_frame := NTSC_SCANLINES_PER_FRAME
+            nes.timing.target_fps := 60.0988
+            
+        CASE PAL:
+            nes.timing.cpu_frequency := PAL_CPU_FREQUENCY
+            nes.timing.ppu_frequency := PAL_PPU_FREQUENCY
+            nes.timing.master_frequency := PAL_MASTER_FREQUENCY
+            nes.timing.scanlines_per_frame := PAL_SCANLINES_PER_FRAME
+            nes.timing.target_fps := 50.0070
+            
+        CASE DENDY:
+            nes.timing.cpu_frequency := DENDY_CPU_FREQUENCY
+            nes.timing.ppu_frequency := DENDY_PPU_FREQUENCY
+            nes.timing.master_frequency := DENDY_CPU_FREQUENCY * 12
+            nes.timing.scanlines_per_frame := DENDY_SCANLINES_PER_FRAME
+            nes.timing.target_fps := 50.0070
+            
+        DEFAULT:
+            // Multi-region defaults to NTSC
+            nes_set_region(nes, NTSC)
+    END
+    
+    // Calculate cycles per frame
+    nes.timing.cpu_cycles_per_frame := 
+        nes.timing.scanlines_per_frame * 341 / 3
+    nes.timing.ppu_cycles_per_frame := 
+        nes.timing.scanlines_per_frame * 341
+    nes.timing.frame_time_ns := 
+        1000000000 / nes.timing.target_fps
+END
+
+FUNCTION nes_get_scanlines_per_frame(nes: NES*) RETURNS u16:
+    RETURN nes.timing.scanlines_per_frame
+END
+
+// ============================================================================
+// SAVE STATE SUPPORT
+// ============================================================================
+
+STRUCT SaveState:
+    // Header
+    magic: u32          // 'NES\0'
+    version: u32        // Save state version
+    timestamp: u64      // When saved
+    
+    // System info
+    rom_crc32: u32      // For verification
+    mapper_id: u16
+    
+    // Component states
+    cpu_state: CPUSaveState
+    ppu_state: PPUSaveState
+    apu_state: APUSaveState
+    
+    // Memory
+    ram: u8[0x800]
+    
+    // Cartridge data
+    prg_ram_size: u32
+    prg_ram: u8[]       // Variable size
+    chr_ram_size: u32
+    chr_ram: u8[]       // Variable size
+    mapper_state_size: u32
+    mapper_state: u8[]  // Variable size, mapper-specific
+    
+    // Timing
+    frame_count: u64
+    cpu_cycles: u64
+    ppu_cycles: u64
+END
+
+FUNCTION nes_save_state(nes: NES*, filename: string) RETURNS bool:
+    IF nes.state != RUNNING AND nes.state != PAUSED: RETURN false
+    IF nes.cartridge == NULL: RETURN false
+    
+    state := SaveState{}
+    
+    // Header
+    state.magic := 0x0053454E  // 'NES\0' 
+    state.version := 1
+    state.timestamp := get_timestamp()
+    
+    // ROM info
+    state.rom_crc32 := nes.cartridge.crc32
+    state.mapper_id := nes.cartridge.mapper_id
+    
+    // Save component states
+    cpu_save_state(&nes.cpu, &state.cpu_state)
+    ppu_save_state(&nes.ppu, &state.ppu_state)
+    apu_save_state(&nes.apu, &state.apu_state)
+    
+    // Save RAM
+    FOR i := 0 TO 0x7FF:
+        state.ram[i] := memory_read(&nes.memory, i)
+    END
+    
+    // Save cartridge state
+    IF nes.cartridge.prg_ram != NULL:
+        state.prg_ram_size := nes.cartridge.prg_ram_size
+        state.prg_ram := COPY(nes.cartridge.prg_ram, state.prg_ram_size)
+    END
+    
+    IF nes.cartridge.chr_ram != NULL:
+        state.chr_ram_size := nes.cartridge.chr_ram_size
+        state.chr_ram := COPY(nes.cartridge.chr_ram, state.chr_ram_size)
+    END
+    
+    // Save mapper state
+    IF nes.cartridge.mapper != NULL:
+        state.mapper_state_size := mapper_get_state_size(nes.cartridge.mapper)
+        IF state.mapper_state_size > 0:
+            state.mapper_state := ALLOCATE(state.mapper_state_size)
+            mapper_save_state(nes.cartridge.mapper, state.mapper_state)
+        END
+    END
+    
+    // Save timing
+    state.frame_count := nes.timing.frame_count
+    state.cpu_cycles := nes.timing.cpu_cycles
+    state.ppu_cycles := nes.timing.ppu_cycles
+    
+    // Write to file
+    success := write_save_state_file(filename, &state)
+    
+    // Clean up
+    IF state.prg_ram != NULL: DEALLOCATE(state.prg_ram)
+    IF state.chr_ram != NULL: DEALLOCATE(state.chr_ram)
+    IF state.mapper_state != NULL: DEALLOCATE(state.mapper_state)
+    
+    RETURN success
+END
+
+FUNCTION nes_load_state(nes: NES*, filename: string) RETURNS bool:
+    IF nes.cartridge == NULL: RETURN false
+    
+    state := read_save_state_file(filename)
+    IF state == NULL: RETURN false
+    
+    // Verify header
+    IF state.magic != 0x0053454E OR state.version != 1:
+        DEALLOCATE(state)
+        RETURN false
+    END
+    
+    // Verify ROM match
+    IF state.rom_crc32 != nes.cartridge.crc32:
+        DEALLOCATE(state)
+        RETURN false
+    END
+    
+    // Restore component states
+    cpu_load_state(&nes.cpu, &state.cpu_state)
+    ppu_load_state(&nes.ppu, &state.ppu_state)
+    apu_load_state(&nes.apu, &state.apu_state)
+    
+    // Restore RAM
+    FOR i := 0 TO 0x7FF:
+        memory_write(&nes.memory, i, state.ram[i])
+    END
+    
+    // Restore cartridge state
+    IF state.prg_ram_size > 0 AND nes.cartridge.prg_ram != NULL:
+        COPY(state.prg_ram, nes.cartridge.prg_ram, 
+             MIN(state.prg_ram_size, nes.cartridge.prg_ram_size))
+    END
+    
+    IF state.chr_ram_size > 0 AND nes.cartridge.chr_ram != NULL:
+        COPY(state.chr_ram, nes.cartridge.chr_ram,
+             MIN(state.chr_ram_size, nes.cartridge.chr_ram_size))
+    END
+    
+    // Restore mapper state
+    IF state.mapper_state_size > 0 AND nes.cartridge.mapper != NULL:
+        mapper_load_state(nes.cartridge.mapper, state.mapper_state)
+    END
+    
+    // Restore timing
+    nes.timing.frame_count := state.frame_count
+    nes.timing.cpu_cycles := state.cpu_cycles
+    nes.timing.ppu_cycles := state.ppu_cycles
+    
+    DEALLOCATE(state)
+    RETURN true
+END
+
+// ============================================================================
+// SRAM PERSISTENCE
+// ============================================================================
+
+FUNCTION nes_get_sram_filename(nes: NES*, rom_filename: string) RETURNS string:
+    // Replace extension with .sav
+    base := remove_extension(rom_filename)
+    RETURN nes.config.save_path + "/" + base + ".sav"
+END
+
+FUNCTION nes_save_sram(nes: NES*) RETURNS bool:
+    IF nes.cartridge == NULL: RETURN false
+    IF nes.cartridge.prg_ram == NULL: RETURN false
+    IF NOT nes.cartridge.battery: RETURN false
+    
+    filename := nes_get_sram_filename(nes, nes.cartridge.filename)
+    RETURN write_file_binary(filename, nes.cartridge.prg_ram, 
+                           nes.cartridge.prg_ram_size)
+END
+
+FUNCTION nes_load_sram(nes: NES*) RETURNS bool:
+    IF nes.cartridge == NULL: RETURN false
+    IF nes.cartridge.prg_ram == NULL: RETURN false
+    IF NOT nes.cartridge.battery: RETURN false
+    
+    filename := nes_get_sram_filename(nes, nes.cartridge.filename)
+    data, size := read_file_binary(filename)
+    IF data == NULL: RETURN false
+    
+    // Copy to PRG RAM
+    copy_size := MIN(size, nes.cartridge.prg_ram_size)
+    COPY(data, nes.cartridge.prg_ram, copy_size)
+    
+    DEALLOCATE(data)
+    RETURN true
+END
+
+// ============================================================================
+// DEBUG SUPPORT
+// ============================================================================
+
+FUNCTION nes_add_breakpoint(nes: NES*, addr: u16):
+    nes.breakpoints.add(addr)
+END
+
+FUNCTION nes_remove_breakpoint(nes: NES*, addr: u16):
+    nes.breakpoints.remove(addr)
+END
+
+FUNCTION nes_step_instruction(nes: NES*) RETURNS u8:
+    IF nes.state != PAUSED: RETURN 0
+    
+    // Run one CPU instruction
+    cycles := nes_run_cpu_cycle(nes)
+    
+    // Run corresponding PPU/APU cycles
+    FOR i := 0 TO (cycles * 3 - 1):
+        nes_run_ppu_cycle(nes)
+        IF (i % 2) == 1:
+            apu_clock(&nes.apu)
+        END
+    END
+    
+    RETURN cycles
+END
+
+FUNCTION nes_get_debug_info(nes: NES*) RETURNS string:
+    info := "NES State:\n"
+    info += "  Region: " + region_to_string(nes.timing.region) + "\n"
+    info += "  Frame: " + string(nes.timing.frame_count) + "\n"
+    info += "  Scanline: " + string(nes.timing.scanline) + "\n"
+    info += "\nCPU:\n" + cpu_get_debug_string(&nes.cpu)
+    info += "\nPPU:\n" + ppu_get_debug_string(&nes.ppu)
+    
+    IF nes.cartridge != NULL:
+        info += "\nCartridge:\n"
+        info += "  Mapper: " + string(nes.cartridge.mapper_id) + "\n"
+        info += "  PRG Banks: " + string(nes.cartridge.prg_rom_size / 16384) + "\n"
+        info += "  CHR Banks: " + string(nes.cartridge.chr_rom_size / 8192) + "\n"
+    END
+    
+    RETURN info
+END
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+// Callbacks
+FUNCTION nes_set_video_callback(nes: NES*, callback: FUNCTION(u32[256*240])):
+    nes.video_callback := callback
+END
+
+FUNCTION nes_set_audio_callback(nes: NES*, callback: FUNCTION(f32[], u32)):
+    nes.audio_callback := callback
+END
+
+FUNCTION nes_set_input_callback(nes: NES*, callback: FUNCTION(u8) -> u8):
+    nes.input_callback := callback
+    input_set_callback(&nes.input, callback)
+END
+
+// Configuration
+FUNCTION nes_set_config(nes: NES*, config: NESConfig*):
+    nes.config := *config
+    IF config.region != nes.timing.region:
+        nes_set_region(nes, config.region)
+    END
+END
+
+// State control
+FUNCTION nes_pause(nes: NES*):
+    IF nes.state == RUNNING:
+        nes.state := PAUSED
+    END
+END
+
+FUNCTION nes_resume(nes: NES*):
+    IF nes.state == PAUSED:
+        nes.state := RUNNING
+    END
+END
+
+FUNCTION nes_get_state(nes: NES*) RETURNS EmulatorState:
+    RETURN nes.state
+END
+

@@ -1,255 +1,805 @@
-############################################################
-#  NES CARTRIDGE / MAPPER SYSTEM                           #
-#  LITERATE, IMPERATIVE PSEUDO-CODE                        #
-############################################################
+# ROM.sudo - NES ROM File Loading and Parsing
+# Handles iNES and NES 2.0 format ROM files
 
-########################################
-# SECTION 0 — NUMERIC & BIT CONVENTIONS
-########################################
+IMPORT Cartridge
 
-CONST ADDR_PRG_ROM_START = 0x8000
-CONST ADDR_PRG_ROM_END   = 0xFFFF
-CONST ADDR_CHR_ROM_START = 0x0000
-CONST ADDR_CHR_ROM_END   = 0x1FFF
+# ============================================================================
+# CONSTANTS
+# ============================================================================
 
-CONST MAPPER_NROM = 0
-CONST MAPPER_MMC1 = 1
-CONST MAPPER_UNROM = 2
-CONST MAPPER_CNROM = 3
-# Add more as needed
+# File format magic
+CONST NES_MAGIC: ARRAY[4] OF u8 = [0x4E, 0x45, 0x53, 0x1A]  # "NES<EOF>"
 
-######################################
-# SECTION 1 — CARTRIDGE STRUCTURE
-######################################
+# Header offsets
+CONST HEADER_SIZE: u8 = 16
+CONST TRAINER_SIZE: u16 = 512
 
-STRUCT Cartridge:
-    prg_rom_size : u32
-    chr_rom_size : u32
-    prg_ram_size : u32
-    mapper_id    : u8
-    mirror_type  : u8  # 0 = horizontal, 1 = vertical
-    has_battery  : bool
-    has_trainer  : bool
+# Format versions
+CONST FORMAT_INES: u8 = 1
+CONST FORMAT_NES20: u8 = 2
 
-    prg_rom      : ARRAY[0..0x400000] OF u8  # up to 4MB
-    chr_rom      : ARRAY[0..0x200000] OF u8  # up to 2MB
-    prg_ram      : ARRAY[0..0x2000] OF u8    # 8KB default
+# Console types (byte 7 bits 0-1)
+CONST CONSOLE_NES: u8 = 0
+CONST CONSOLE_VS: u8 = 1
+CONST CONSOLE_PLAYCHOICE10: u8 = 2
+CONST CONSOLE_EXTENDED: u8 = 3
 
-    mapper       : MapperInterface
+# TV systems (byte 12 bits 0-1)
+CONST TV_NTSC: u8 = 0
+CONST TV_PAL: u8 = 1
+CONST TV_MULTI: u8 = 2
+CONST TV_DENDY: u8 = 3
+
+# Extended console types (byte 13 bits 0-3 when console type = 3)
+CONST EXT_CONSOLE_REGULAR: u8 = 0
+CONST EXT_CONSOLE_VS: u8 = 1
+CONST EXT_CONSOLE_PC10: u8 = 2
+CONST EXT_CONSOLE_DECIMAL_CPU: u8 = 3
+CONST EXT_CONSOLE_EPSM: u8 = 4
+CONST EXT_CONSOLE_VT01: u8 = 5
+CONST EXT_CONSOLE_VT02: u8 = 6
+CONST EXT_CONSOLE_VT03: u8 = 7
+CONST EXT_CONSOLE_VT09: u8 = 8
+CONST EXT_CONSOLE_VT32: u8 = 9
+CONST EXT_CONSOLE_VT369: u8 = 10
+CONST EXT_CONSOLE_UM6578: u8 = 11
+CONST EXT_CONSOLE_FAMICOM_NETWORK: u8 = 12
+
+# ============================================================================
+# DATA STRUCTURES  
+# ============================================================================
+
+STRUCT ROMFile
+    # File data
+    data: PTR[u8]
+    size: u32
+    
+    # Header (16 bytes)
+    header: ARRAY[16] OF u8
+    
+    # Format detection
+    format_version: u8  # FORMAT_INES or FORMAT_NES20
+    
+    # Parsed header info
+    prg_size: u32       # In bytes
+    chr_size: u32       # In bytes
+    prg_ram_size: u32   # In bytes
+    prg_nvram_size: u32 # In bytes
+    chr_ram_size: u32   # In bytes
+    chr_nvram_size: u32 # In bytes
+    
+    # Mapper info
+    mapper_id: u16
+    submapper_id: u8
+    
+    # Hardware info
+    mirroring: u8
+    has_battery: bool
+    has_trainer: bool
+    four_screen: bool
+    
+    # Console/timing info
+    console_type: u8
+    vs_system_type: u8
+    vs_ppu_type: u8
+    timing_mode: u8
+    
+    # Miscellaneous
+    misc_rom_count: u8
+    default_expansion: u8
+    
+    # Data pointers
+    trainer_offset: u32
+    prg_offset: u32
+    chr_offset: u32
+    misc_offset: u32
 END
 
-STRUCT MapperInterface:
-    # Function pointers or handlers
-    write_register : FUNCTION(addr: u16, value: u8)
-    read_register  : FUNCTION(addr: u16) RETURNS u8
-    step           : FUNCTION()  # optional per-cycle logic
+STRUCT ParseError
+    success: bool
+    error_msg: STRING
+    error_offset: u32
 END
 
-######################################
-# SECTION 2 — MAPPER FACTORY
-######################################
+# ============================================================================
+# ROM FILE READING
+# ============================================================================
 
-FUNCTION CREATE_MAPPER(cart: Cartridge) RETURNS MapperInterface:
-    SWITCH cart.mapper_id:
-        CASE MAPPER_NROM:
-            RETURN CREATE_MAPPER_NROM(cart)
-        CASE MAPPER_MMC1:
-            RETURN CREATE_MAPPER_MMC1(cart)
-        DEFAULT:
-            ABORT("Unsupported mapper ID: " + cart.mapper_id)
+FUNCTION rom_load_file(filename: STRING) -> PTR[ROMFile]
+    VAR rom: PTR[ROMFile] = ALLOCATE[ROMFile]
+    
+    # Read entire file into memory
+    VAR file_size: u32
+    rom.data = read_file_binary(filename, &file_size)
+    
+    IF rom.data == NULL THEN
+        PRINT("Error: Could not open ROM file: " + filename)
+        FREE(rom)
+        RETURN NULL
     END
-END
-
-######################################
-# SECTION 3 — NROM (MAPPER 0)
-######################################
-
-STRUCT MapperNROM:
-    cart : Cartridge
-END
-
-FUNCTION CREATE_MAPPER_NROM(cart: Cartridge) RETURNS MapperInterface:
-    mapper := MapperNROM(cart: cart)
-    RETURN MapperInterface(
-        write_register: NROM_WRITE,
-        read_register: NROM_READ,
-        step: NULL
-    )
-END
-
-FUNCTION NROM_READ(mapper: MapperNROM, addr: u16) RETURNS u8:
-    IF addr >= 0x8000 AND addr <= 0xFFFF:
-        # NROM has 16KB or 32KB PRG ROM
-        offset := addr - 0x8000
-        IF mapper.cart.prg_rom_size == 0x4000:  # 16KB
-            offset := offset MOD 0x4000
-        END
-        RETURN mapper.cart.prg_rom[offset]
-    ELIF addr >= 0x6000 AND addr <= 0x7FFF:
-        RETURN mapper.cart.prg_ram[addr - 0x6000]
-    ELSE:
-        RETURN 0
+    
+    rom.size = file_size
+    
+    # Verify minimum size
+    IF rom.size < HEADER_SIZE THEN
+        PRINT("Error: ROM file too small")
+        FREE(rom.data)
+        FREE(rom)
+        RETURN NULL
     END
+    
+    # Copy header
+    MEMCPY(rom.header, rom.data, HEADER_SIZE)
+    
+    RETURN rom
 END
 
-FUNCTION NROM_WRITE(mapper: MapperNROM, addr: u16, value: u8):
-    IF addr >= 0x6000 AND addr <= 0x7FFF:
-        mapper.cart.prg_ram[addr - 0x6000] := value
+FUNCTION rom_unload_file(rom: PTR[ROMFile])
+    IF rom == NULL THEN RETURN END
+    
+    IF rom.data != NULL THEN
+        FREE(rom.data)
     END
-    # Writes to PRG ROM area are ignored
+    
+    FREE(rom)
 END
 
-######################################
-# SECTION 4 — MMC1 (MAPPER 1)
-######################################
+# ============================================================================
+# HEADER PARSING
+# ============================================================================
 
-STRUCT MapperMMC1:
-    cart : Cartridge
-    shift_register : u8
-    control : u8
-    chr_bank0 : u8
-    chr_bank1 : u8
-    prg_bank : u8
-    write_count : u8
-END
-
-FUNCTION CREATE_MAPPER_MMC1(cart: Cartridge) RETURNS MapperInterface:
-    mapper := MapperMMC1(
-        cart: cart,
-        shift_register: 0x10,
-        control: 0x0C,
-        chr_bank0: 0,
-        chr_bank1: 0,
-        prg_bank: 0,
-        write_count: 0
-    )
-    RETURN MapperInterface(
-        write_register: MMC1_WRITE,
-        read_register: MMC1_READ,
-        step: NULL
-    )
-END
-
-FUNCTION MMC1_WRITE(mapper: MapperMMC1, addr: u16, value: u8):
-    IF (value AND 0x80) != 0:
-        mapper.shift_register := 0x10
-        mapper.write_count := 0
-        mapper.control := mapper.control OR 0x0C
-        RETURN
-    END
-
-    IF addr >= 0x8000 AND addr <= 0xFFFF:
-        IF (mapper.shift_register AND 1) != 0:
-            mapper.shift_register := (mapper.shift_register >> 1) OR ((value AND 1) << 4)
-        ELSE:
-            mapper.shift_register := mapper.shift_register >> 1
-        END
-
-        mapper.write_count := mapper.write_count + 1
-
-        IF mapper.write_count == 5:
-            register := (addr >> 13) AND 3
-            final_value := mapper.shift_register AND 0x1F
-            mapper.shift_register := 0x10
-            mapper.write_count := 0
-
-            SWITCH register:
-                CASE 0:  # Control
-                    mapper.control := final_value
-                CASE 1:  # CHR bank 0
-                    mapper.chr_bank0 := final_value
-                CASE 2:  # CHR bank 1
-                    mapper.chr_bank1 := final_value
-                CASE 3:  # PRG bank
-                    mapper.prg_bank := final_value
-            END
+FUNCTION rom_verify_header(rom: PTR[ROMFile]) -> ParseError
+    VAR error: ParseError
+    error.success = true
+    
+    # Check magic bytes
+    FOR i FROM 0 TO 3
+        IF rom.header[i] != NES_MAGIC[i] THEN
+            error.success = false
+            error.error_msg = "Invalid NES header magic"
+            error.error_offset = i
+            RETURN error
         END
     END
+    
+    # Detect format version
+    VAR format_bits: u8 = (rom.header[7] AND 0x0C)
+    
+    IF format_bits == 0x08 THEN
+        rom.format_version = FORMAT_NES20
+    ELSE IF format_bits == 0x00 THEN
+        rom.format_version = FORMAT_INES
+    ELSE
+        error.success = false
+        error.error_msg = "Invalid format identifier"
+        error.error_offset = 7
+        RETURN error
+    END
+    
+    RETURN error
 END
 
-FUNCTION MMC1_READ(mapper: MapperMMC1, addr: u16) RETURNS u8:
-    IF addr >= 0x8000 AND addr <= 0xFFFF:
-        bank_mode := (mapper.control >> 2) AND 3
-        bank_select := mapper.prg_bank AND 0x0F
+FUNCTION rom_parse_sizes_ines(rom: PTR[ROMFile])
+    # iNES format - simple 16KB/8KB units
+    rom.prg_size = rom.header[4] * 16384  # 16KB units
+    rom.chr_size = rom.header[5] * 8192   # 8KB units
+    
+    # RAM sizes not specified in iNES
+    rom.prg_ram_size = 8192  # Default 8KB
+    rom.prg_nvram_size = 0
+    rom.chr_ram_size = IF rom.chr_size == 0 THEN 8192 ELSE 0
+    rom.chr_nvram_size = 0
+END
 
-        SWITCH bank_mode:
-            CASE 0: CASE 1:  # 32KB mode
-                bank := (bank_select >> 1) AND 0x07
-                offset := addr - 0x8000
-                RETURN mapper.cart.prg_rom[(bank * 0x8000) + offset]
-            CASE 2:  # First bank fixed at $8000
-                IF addr < 0xC000:
-                    RETURN mapper.cart.prg_rom[addr - 0x8000]
-                ELSE:
-                    offset := addr - 0xC000
-                    RETURN mapper.cart.prg_rom[(bank_select * 0x4000) + offset]
-                END
-            CASE 3:  # Last bank fixed at $C000
-                IF addr < 0xC000:
-                    offset := addr - 0x8000
-                    RETURN mapper.cart.prg_rom[(bank_select * 0x4000) + offset]
-                ELSE:
-                    last_bank := (mapper.cart.prg_rom_size / 0x4000) - 1
-                    offset := addr - 0xC000
-                    RETURN mapper.cart.prg_rom[(last_bank * 0x4000) + offset]
-                END
+FUNCTION rom_parse_sizes_nes20(rom: PTR[ROMFile])
+    # PRG ROM size
+    VAR prg_lsb: u8 = rom.header[4]
+    VAR prg_msb: u8 = rom.header[9] AND 0x0F
+    
+    IF prg_msb == 0x0F THEN
+        # Exponent-multiplier notation
+        VAR exponent: u8 = (prg_lsb >> 2) AND 0x3F
+        VAR multiplier: u8 = (prg_lsb AND 0x03) * 2 + 1
+        rom.prg_size = (1 << exponent) * multiplier
+    ELSE
+        # Simple notation
+        rom.prg_size = ((prg_msb << 8) | prg_lsb) * 16384
+    END
+    
+    # CHR ROM size
+    VAR chr_lsb: u8 = rom.header[5]
+    VAR chr_msb: u8 = (rom.header[9] >> 4) AND 0x0F
+    
+    IF chr_msb == 0x0F THEN
+        # Exponent-multiplier notation
+        VAR exponent: u8 = (chr_lsb >> 2) AND 0x3F
+        VAR multiplier: u8 = (chr_lsb AND 0x03) * 2 + 1
+        rom.chr_size = (1 << exponent) * multiplier
+    ELSE
+        # Simple notation
+        rom.chr_size = ((chr_msb << 8) | chr_lsb) * 8192
+    END
+    
+    # PRG RAM/NVRAM sizes
+    VAR prg_ram_shift: u8 = rom.header[10] AND 0x0F
+    VAR prg_nvram_shift: u8 = (rom.header[10] >> 4) AND 0x0F
+    
+    rom.prg_ram_size = IF prg_ram_shift > 0 THEN (64 << prg_ram_shift) ELSE 0
+    rom.prg_nvram_size = IF prg_nvram_shift > 0 THEN (64 << prg_nvram_shift) ELSE 0
+    
+    # CHR RAM/NVRAM sizes
+    VAR chr_ram_shift: u8 = rom.header[11] AND 0x0F
+    VAR chr_nvram_shift: u8 = (rom.header[11] >> 4) AND 0x0F
+    
+    rom.chr_ram_size = IF chr_ram_shift > 0 THEN (64 << chr_ram_shift) ELSE 0
+    rom.chr_nvram_size = IF chr_nvram_shift > 0 THEN (64 << chr_nvram_shift) ELSE 0
+END
+
+FUNCTION rom_parse_header(rom: PTR[ROMFile]) -> ParseError
+    VAR error: ParseError = rom_verify_header(rom)
+    IF NOT error.success THEN RETURN error END
+    
+    # Parse mapper number
+    rom.mapper_id = (rom.header[6] >> 4) | ((rom.header[7] AND 0xF0))
+    
+    IF rom.format_version == FORMAT_NES20 THEN
+        # NES 2.0 has extended mapper bits
+        rom.mapper_id = rom.mapper_id | ((rom.header[8] AND 0x0F) << 8)
+        rom.submapper_id = (rom.header[8] >> 4) AND 0x0F
+    ELSE
+        rom.submapper_id = 0
+    END
+    
+    # Parse flags
+    rom.mirroring = rom.header[6] AND 0x01
+    rom.has_battery = (rom.header[6] AND 0x02) != 0
+    rom.has_trainer = (rom.header[6] AND 0x04) != 0
+    rom.four_screen = (rom.header[6] AND 0x08) != 0
+    
+    # Parse console type
+    rom.console_type = rom.header[7] AND 0x03
+    
+    # Parse sizes based on format
+    IF rom.format_version == FORMAT_NES20 THEN
+        rom_parse_sizes_nes20(rom)
+        
+        # Parse timing
+        rom.timing_mode = rom.header[12] AND 0x03
+        
+        # Parse VS System info
+        IF rom.console_type == CONSOLE_VS THEN
+            rom.vs_ppu_type = rom.header[13] AND 0x0F
+            rom.vs_system_type = (rom.header[13] >> 4) AND 0x0F
+        ELSE IF rom.console_type == CONSOLE_EXTENDED THEN
+            # Extended console type
+            rom.console_type = rom.header[13] AND 0x0F
         END
-    ELIF addr >= 0x6000 AND addr <= 0x7FFF:
-        RETURN mapper.cart.prg_ram[addr - 0x6000]
-    ELSE:
-        RETURN 0
+        
+        # Parse miscellaneous
+        rom.misc_rom_count = rom.header[14] AND 0x03
+        rom.default_expansion = rom.header[15] AND 0x3F
+    ELSE
+        rom_parse_sizes_ines(rom)
+        
+        # iNES defaults
+        rom.timing_mode = TV_NTSC
+        rom.misc_rom_count = 0
+        rom.default_expansion = 0
     END
+    
+    # Calculate data offsets
+    rom.trainer_offset = HEADER_SIZE
+    rom.prg_offset = HEADER_SIZE + (IF rom.has_trainer THEN TRAINER_SIZE ELSE 0)
+    rom.chr_offset = rom.prg_offset + rom.prg_size
+    rom.misc_offset = rom.chr_offset + rom.chr_size
+    
+    # Verify file size
+    VAR expected_size: u32 = rom.misc_offset
+    IF rom.format_version == FORMAT_NES20 AND rom.misc_rom_count > 0 THEN
+        # We don't know misc ROM sizes without parsing them
+        # Just verify we have at least the main data
+        IF rom.size < expected_size THEN
+            error.success = false
+            error.error_msg = "File too small for specified ROM sizes"
+            error.error_offset = rom.size
+            RETURN error
+        END
+    ELSE
+        # For iNES, file should match exactly (or have extra garbage)
+        IF rom.size < expected_size THEN
+            error.success = false
+            error.error_msg = "File too small for specified ROM sizes"
+            error.error_offset = rom.size
+            RETURN error
+        END
+    END
+    
+    error.success = true
+    RETURN error
 END
 
-######################################
-# SECTION 5 — CARTRIDGE LOADER
-######################################
+# ============================================================================
+# CARTRIDGE CREATION
+# ============================================================================
 
-FUNCTION LOAD_CARTRIDGE(filename: string) RETURNS Cartridge:
-    file := OPEN_FILE(filename)
-    header := READ_HEADER(file)
-
-    cart := Cartridge(
-        prg_rom_size: header.prg_rom_size * 0x4000,
-        chr_rom_size: header.chr_rom_size * 0x2000,
-        prg_ram_size: header.prg_ram_size,
-        mapper_id: header.mapper_id,
-        mirror_type: header.mirror_type,
-        has_battery: header.has_battery,
-        has_trainer: header.has_trainer
-    )
-
-    IF cart.has_trainer:
-        SKIP_TRAINER(file)
+FUNCTION rom_create_cartridge(rom: PTR[ROMFile]) -> PTR[Cartridge]
+    VAR cart: PTR[Cartridge] = cartridge_create()
+    
+    # Copy header info
+    cart.header.prg_rom_size = rom.prg_size / 16384
+    cart.header.chr_rom_size = rom.chr_size / 8192
+    cart.header.mapper_number = rom.mapper_id
+    cart.header.submapper = rom.submapper_id
+    cart.header.mirroring = rom.mirroring
+    cart.header.has_battery = rom.has_battery
+    cart.header.has_trainer = rom.has_trainer
+    cart.header.four_screen_vram = rom.four_screen
+    cart.header.ines_version = rom.format_version
+    
+    # Set RAM sizes
+    cart.header.prg_ram_size = rom.prg_ram_size
+    cart.header.prg_nvram_size = rom.prg_nvram_size
+    cart.header.chr_ram_size = rom.chr_ram_size
+    cart.header.chr_nvram_size = rom.chr_nvram_size
+    
+    # Set console info
+    IF rom.console_type == CONSOLE_VS THEN
+        cart.header.vs_system = true
+        cart.header.playchoice10 = false
+    ELSE IF rom.console_type == CONSOLE_PLAYCHOICE10 THEN
+        cart.header.vs_system = false
+        cart.header.playchoice10 = true
+    ELSE
+        cart.header.vs_system = false
+        cart.header.playchoice10 = false
     END
-
-    READ_FILE(file, cart.prg_rom, cart.prg_rom_size)
-    READ_FILE(file, cart.chr_rom, cart.chr_rom_size)
-
-    cart.mapper := CREATE_MAPPER(cart)
-
+    
+    cart.header.tv_system = rom.timing_mode
+    cart.header.misc_rom_count = rom.misc_rom_count
+    cart.header.default_expansion = rom.default_expansion
+    
+    # Allocate cartridge memory
+    cartridge_allocate_memory(cart)
+    
+    # Copy ROM data
+    IF rom.prg_size > 0 AND cart.prg_rom != NULL THEN
+        MEMCPY(cart.prg_rom, rom.data + rom.prg_offset, rom.prg_size)
+    END
+    
+    IF rom.chr_size > 0 AND cart.chr_rom != NULL THEN
+        MEMCPY(cart.chr_rom, rom.data + rom.chr_offset, rom.chr_size)
+    END
+    
+    # Handle trainer
+    IF rom.has_trainer THEN
+        # Trainers are loaded at $7000-$71FF
+        # This would require special handling in the memory module
+        PRINT("Warning: Trainer present but not loaded")
+    END
+    
+    # Set cartridge type based on region/console
+    IF rom.timing_mode == TV_PAL THEN
+        cart.region = 1  # PAL
+    ELSE
+        cart.region = 0  # NTSC
+    END
+    
+    # Detect hardware
+    cartridge_detect_hardware(cart)
+    
+    # Look up in database for additional info
+    cartridge_lookup_database(cart)
+    
+    # Create mapper
+    cart.mapper = create_mapper(cart)
+    
+    # Load battery RAM if present
+    IF cart.header.has_battery THEN
+        cartridge_load_battery_ram(cart)
+    END
+    
     RETURN cart
 END
 
-######################################
-# SECTION 6 — MEMORY ACCESS INTEGRATION
-######################################
+# ============================================================================
+# HIGH-LEVEL LOADING FUNCTIONS
+# ============================================================================
 
-FUNCTION READ_CARTRIDGE_MEMORY(cart: Cartridge, addr: u16) RETURNS u8:
-    RETURN cart.mapper.read_register(cart.mapper, addr)
+FUNCTION rom_load(filename: STRING) -> PTR[Cartridge]
+    # Load ROM file
+    VAR rom: PTR[ROMFile] = rom_load_file(filename)
+    IF rom == NULL THEN
+        RETURN NULL
+    END
+    
+    # Parse header
+    VAR error: ParseError = rom_parse_header(rom)
+    IF NOT error.success THEN
+        PRINT("ROM parsing error: " + error.error_msg)
+        rom_unload_file(rom)
+        RETURN NULL
+    END
+    
+    # Create cartridge
+    VAR cart: PTR[Cartridge] = rom_create_cartridge(rom)
+    
+    # Clean up ROM file data
+    rom_unload_file(rom)
+    
+    RETURN cart
 END
 
-FUNCTION WRITE_CARTRIDGE_MEMORY(cart: Cartridge, addr: u16, value: u8):
-    cart.mapper.write_register(cart.mapper, addr, value)
+FUNCTION rom_load_from_memory(data: PTR[u8], size: u32) -> PTR[Cartridge]
+    VAR rom: PTR[ROMFile] = ALLOCATE[ROMFile]
+    
+    # Copy data
+    rom.data = ALLOCATE_ARRAY[u8](size)
+    MEMCPY(rom.data, data, size)
+    rom.size = size
+    
+    # Copy header
+    IF size >= HEADER_SIZE THEN
+        MEMCPY(rom.header, rom.data, HEADER_SIZE)
+    ELSE
+        PRINT("Error: ROM data too small")
+        FREE(rom.data)
+        FREE(rom)
+        RETURN NULL
+    END
+    
+    # Parse header
+    VAR error: ParseError = rom_parse_header(rom)
+    IF NOT error.success THEN
+        PRINT("ROM parsing error: " + error.error_msg)
+        rom_unload_file(rom)
+        RETURN NULL
+    END
+    
+    # Create cartridge
+    VAR cart: PTR[Cartridge] = rom_create_cartridge(rom)
+    
+    # Clean up
+    rom_unload_file(rom)
+    
+    RETURN cart
 END
 
-######################################
-# SECTION 7 — MAPPER STEP (FOR IRQs, etc.)
-######################################
+# ============================================================================
+# ROM INFORMATION
+# ============================================================================
 
-FUNCTION STEP_MAPPER(cart: Cartridge):
-    IF cart.mapper.step != NULL:
-        cart.mapper.step(cart.mapper)
+FUNCTION rom_get_format_string(format: u8) -> STRING
+    SWITCH format
+        CASE FORMAT_INES:
+            RETURN "iNES"
+        CASE FORMAT_NES20:
+            RETURN "NES 2.0"
+        DEFAULT:
+            RETURN "Unknown"
+    END
+END
+
+FUNCTION rom_get_console_string(console_type: u8, extended_type: u8) -> STRING
+    SWITCH console_type
+        CASE CONSOLE_NES:
+            RETURN "Nintendo Entertainment System"
+            
+        CASE CONSOLE_VS:
+            RETURN "Nintendo Vs. System"
+            
+        CASE CONSOLE_PLAYCHOICE10:
+            RETURN "Nintendo PlayChoice-10"
+            
+        CASE CONSOLE_EXTENDED:
+            SWITCH extended_type
+                CASE EXT_CONSOLE_VT01:
+                    RETURN "V.R. Technology VT01"
+                CASE EXT_CONSOLE_VT02:
+                    RETURN "V.R. Technology VT02"
+                CASE EXT_CONSOLE_VT03:
+                    RETURN "V.R. Technology VT03"
+                CASE EXT_CONSOLE_VT09:
+                    RETURN "V.R. Technology VT09"
+                CASE EXT_CONSOLE_VT32:
+                    RETURN "V.R. Technology VT32"
+                CASE EXT_CONSOLE_VT369:
+                    RETURN "V.R. Technology VT369"
+                CASE EXT_CONSOLE_UM6578:
+                    RETURN "UMC UM6578"
+                CASE EXT_CONSOLE_FAMICOM_NETWORK:
+                    RETURN "Famicom Network System"
+                DEFAULT:
+                    RETURN "Extended Console Type " + STR(extended_type)
+            END
+            
+        DEFAULT:
+            RETURN "Unknown Console"
+    END
+END
+
+FUNCTION rom_get_timing_string(timing: u8) -> STRING
+    SWITCH timing
+        CASE TV_NTSC:
+            RETURN "NTSC (RP2C02)"
+        CASE TV_PAL:
+            RETURN "PAL (RP2C07)"
+        CASE TV_MULTI:
+            RETURN "Multiple-region"
+        CASE TV_DENDY:
+            RETURN "Dendy (UA6538)"
+        DEFAULT:
+            RETURN "Unknown"
+    END
+END
+
+FUNCTION rom_get_info_string(rom: PTR[ROMFile]) -> STRING
+    VAR info: STRING = "ROM Information:\n"
+    
+    info = info + "  Format: " + rom_get_format_string(rom.format_version) + "\n"
+    info = info + "  Console: " + rom_get_console_string(rom.console_type, 0) + "\n"
+    info = info + "  Timing: " + rom_get_timing_string(rom.timing_mode) + "\n"
+    info = info + "  Mapper: " + STR(rom.mapper_id)
+    
+    IF rom.submapper_id > 0 THEN
+        info = info + "." + STR(rom.submapper_id)
+    END
+    info = info + "\n"
+    
+    info = info + "  PRG ROM: " + STR(rom.prg_size / 1024) + " KB\n"
+    info = info + "  CHR ROM: " + STR(rom.chr_size / 1024) + " KB\n"
+    
+    IF rom.prg_ram_size > 0 THEN
+        info = info + "  PRG RAM: " + STR(rom.prg_ram_size / 1024) + " KB\n"
+    END
+    
+    IF rom.prg_nvram_size > 0 THEN
+        info = info + "  PRG NVRAM: " + STR(rom.prg_nvram_size / 1024) + " KB\n"
+    END
+    
+    IF rom.chr_ram_size > 0 THEN
+        info = info + "  CHR RAM: " + STR(rom.chr_ram_size / 1024) + " KB\n"
+    END
+    
+    IF rom.chr_nvram_size > 0 THEN
+        info = info + "  CHR NVRAM: " + STR(rom.chr_nvram_size / 1024) + " KB\n"
+    END
+    
+    info = info + "  Battery: " + IF rom.has_battery THEN "Yes" ELSE "No" END + "\n"
+    info = info + "  Trainer: " + IF rom.has_trainer THEN "Yes" ELSE "No" END + "\n"
+    info = info + "  Mirroring: " + IF rom.four_screen THEN "Four-screen" 
+                                   ELSE IF rom.mirroring == 0 THEN "Horizontal" 
+                                   ELSE "Vertical" END + "\n"
+    
+    IF rom.format_version == FORMAT_NES20 THEN
+        IF rom.misc_rom_count > 0 THEN
+            info = info + "  Misc ROMs: " + STR(rom.misc_rom_count) + "\n"
+        END
+        
+        IF rom.default_expansion > 0 THEN
+            info = info + "  Default Expansion: " + STR(rom.default_expansion) + "\n"
+        END
+    END
+    
+    RETURN info
+END
+
+# ============================================================================
+# VALIDATION
+# ============================================================================
+
+FUNCTION rom_validate(filename: STRING) -> ParseError
+    VAR error: ParseError
+    error.success = true
+    
+    # Load file
+    VAR rom: PTR[ROMFile] = rom_load_file(filename)
+    IF rom == NULL THEN
+        error.success = false
+        error.error_msg = "Could not open file"
+        error.error_offset = 0
+        RETURN error
+    END
+    
+    # Parse and validate
+    error = rom_parse_header(rom)
+    
+    IF error.success THEN
+        # Additional validation
+        
+        # Check for known bad headers
+        IF rom.format_version == FORMAT_INES THEN
+            # Check for "DiskDude!" contamination
+            VAR has_diskdude: bool = true
+            VAR diskdude: STRING = "DiskDude!"
+            FOR i FROM 0 TO 8
+                IF rom.header[7 + i] != diskdude[i] THEN
+                    has_diskdude = false
+                    BREAK
+                END
+            END
+            
+            IF has_diskdude THEN
+                error.success = false
+                error.error_msg = "Header contaminated with DiskDude!"
+                error.error_offset = 7
+            END
+        END
+        
+        # Validate mapper number
+        IF rom.mapper_id > 4095 THEN  # Max for NES 2.0
+            error.success = false
+            error.error_msg = "Invalid mapper number"
+            error.error_offset = 6
+        END
+        
+        # Print info if successful
+        IF error.success THEN
+            VAR info: STRING = rom_get_info_string(rom)
+            PRINT(info)
+        END
+    END
+    
+    # Clean up
+    rom_unload_file(rom)
+    
+    RETURN error
+END
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+FUNCTION read_file_binary(filename: STRING, size: PTR[u32]) -> PTR[u8]
+    # Platform-specific file reading
+    # This is a stub - would be implemented based on platform
+    RETURN NULL
+END
+
+FUNCTION rom_detect_format(data: PTR[u8], size: u32) -> u8
+    IF size < HEADER_SIZE THEN
+        RETURN 0  # Invalid
+    END
+    
+    # Check magic
+    FOR i FROM 0 TO 3
+        IF data[i] != NES_MAGIC[i] THEN
+            RETURN 0  # Invalid
+        END
+    END
+    
+    # Check format bits
+    VAR format_bits: u8 = (data[7] AND 0x0C)
+    
+    IF format_bits == 0x08 THEN
+        RETURN FORMAT_NES20
+    ELSE IF format_bits == 0x00 THEN
+        RETURN FORMAT_INES
+    END
+    
+    RETURN 0  # Invalid
+END
+
+# ============================================================================
+# VS. SYSTEM SUPPORT
+# ============================================================================
+
+FUNCTION rom_get_vs_ppu_string(ppu_type: u8) -> STRING
+    SWITCH ppu_type
+        CASE 0x0: RETURN "RP2C03B/RC2C03B"
+        CASE 0x1: RETURN "RP2C03G"
+        CASE 0x2: RETURN "RP2C04-0001"
+        CASE 0x3: RETURN "RP2C04-0002"
+        CASE 0x4: RETURN "RP2C04-0003"
+        CASE 0x5: RETURN "RP2C04-0004"
+        CASE 0x6: RETURN "RC2C03B"
+        CASE 0x7: RETURN "RC2C03C"
+        CASE 0x8: RETURN "RC2C05-01"
+        CASE 0x9: RETURN "RC2C05-02"
+        CASE 0xA: RETURN "RC2C05-03"
+        CASE 0xB: RETURN "RC2C05-04"
+        CASE 0xC: RETURN "RC2C05-05"
+        DEFAULT: RETURN "Unknown"
+    END
+END
+
+FUNCTION rom_get_vs_hardware_string(hw_type: u8) -> STRING
+    SWITCH hw_type
+        CASE 0x0: RETURN "Vs. Unisystem (normal)"
+        CASE 0x1: RETURN "Vs. Unisystem (RBI Baseball protection)"
+        CASE 0x2: RETURN "Vs. Unisystem (TKO Boxing protection)"
+        CASE 0x3: RETURN "Vs. Unisystem (Super Xevious protection)"
+        CASE 0x4: RETURN "Vs. Unisystem (Vs. Ice Climber Japan protection)"
+        CASE 0x5: RETURN "Vs. Dual System (normal)"
+        CASE 0x6: RETURN "Vs. Dual System (Raid on Bungeling Bay protection)"
+        DEFAULT: RETURN "Unknown"
+    END
+END
+
+# ============================================================================
+# PLAYCHOICE-10 SUPPORT
+# ============================================================================
+
+FUNCTION rom_parse_playchoice_misc(rom: PTR[ROMFile], cart: PTR[Cartridge])
+    # PlayChoice-10 has 3 misc ROMs:
+    # 1. 8KB INST ROM
+    # 2. 16 bytes PROM Data
+    # 3. 16 bytes PROM Counter Out
+    
+    IF rom.misc_rom_count >= 3 THEN
+        VAR offset: u32 = rom.misc_offset
+        
+        # INST ROM (8192 bytes)
+        # Would be stored in cart for PC10 emulation
+        offset = offset + 8192
+        
+        # PROM Data (16 bytes)
+        offset = offset + 16
+        
+        # PROM Counter Out (16 bytes)
+        offset = offset + 16
+    END
+END
+
+# ============================================================================
+# DEFAULT EXPANSION DEVICES
+# ============================================================================
+
+FUNCTION rom_get_expansion_device_string(device: u8) -> STRING
+    SWITCH device
+        CASE 0x00: RETURN "Unspecified"
+        CASE 0x01: RETURN "Standard Controller"
+        CASE 0x02: RETURN "NES Four Score"
+        CASE 0x03: RETURN "Famicom Four Players Adapter"
+        CASE 0x04: RETURN "Vs. System"
+        CASE 0x05: RETURN "Vs. System (reversed)"
+        CASE 0x06: RETURN "Vs. Pinball (Japan)"
+        CASE 0x07: RETURN "Vs. Zapper"
+        CASE 0x08: RETURN "Zapper"
+        CASE 0x09: RETURN "Two Zappers"
+        CASE 0x0A: RETURN "Bandai Hyper Shot"
+        CASE 0x0B: RETURN "Power Pad Side A"
+        CASE 0x0C: RETURN "Power Pad Side B"
+        CASE 0x0D: RETURN "Family Trainer Side A"
+        CASE 0x0E: RETURN "Family Trainer Side B"
+        CASE 0x0F: RETURN "Arkanoid Vaus (NES)"
+        CASE 0x10: RETURN "Arkanoid Vaus (Famicom)"
+        CASE 0x11: RETURN "Two Arkanoid Vaus + Data Recorder"
+        CASE 0x12: RETURN "Konami Hyper Shot"
+        CASE 0x13: RETURN "Coconuts Pachinko"
+        CASE 0x14: RETURN "Exciting Boxing"
+        CASE 0x15: RETURN "Jissen Mahjong"
+        CASE 0x16: RETURN "Party Tap"
+        CASE 0x17: RETURN "Oeka Kids Tablet"
+        CASE 0x18: RETURN "Sunsoft Barcode Battler"
+        CASE 0x19: RETURN "Miracle Piano"
+        CASE 0x1A: RETURN "Pokkun Moguraa"
+        CASE 0x1B: RETURN "Top Rider"
+        CASE 0x1C: RETURN "Double-Fisted"
+        CASE 0x1D: RETURN "Famicom 3D System"
+        CASE 0x1E: RETURN "Doremikko Keyboard"
+        CASE 0x1F: RETURN "R.O.B. Gyro Set"
+        CASE 0x20: RETURN "Famicom Data Recorder"
+        CASE 0x21: RETURN "ASCII Turbo File"
+        CASE 0x22: RETURN "IGS Storage Battle Box"
+        CASE 0x23: RETURN "Family BASIC Keyboard + Data Recorder"
+        CASE 0x24: RETURN "Dongda PEC-586 Keyboard"
+        CASE 0x25: RETURN "Bit Corp. Bit-79 Keyboard"
+        CASE 0x26: RETURN "Subor Keyboard"
+        CASE 0x27: RETURN "Subor Keyboard + 3x8-bit mouse"
+        CASE 0x28: RETURN "Subor Keyboard + 24-bit mouse"
+        CASE 0x29: RETURN "SNES Mouse"
+        CASE 0x2A: RETURN "Multicart"
+        CASE 0x2B: RETURN "Two SNES Controllers"
+        CASE 0x2C: RETURN "RacerMate Bicycle"
+        CASE 0x2D: RETURN "U-Force"
+        CASE 0x2E: RETURN "R.O.B. Stack-Up"
+        CASE 0x2F: RETURN "City Patrolman Lightgun"
+        CASE 0x30: RETURN "Sharp C1 Cassette"
+        CASE 0x31: RETURN "Standard Controller (inverted)"
+        CASE 0x32: RETURN "Sudoku (Excalibur)"
+        CASE 0x33: RETURN "ABL Pinball"
+        CASE 0x34: RETURN "Golden Nugget Casino"
+        DEFAULT: RETURN "Unknown Device " + STR(device)
     END
 END
 

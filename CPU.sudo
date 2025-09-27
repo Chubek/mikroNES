@@ -1,1130 +1,1453 @@
-LANGUAGE = "pseudocode"        # ← purely illustrative; not a real language.
+# CPU.sudo - NES CPU (RP2A03/RP2A07) Emulation
+# Modified 6502 with audio/DMA features and no decimal mode
 
-############################################################
-#  MOS 6502 — LITERATE, IMPERATIVE PSEUDO-CODE EMULATOR   #
-#  Focus: clarity, correctness, portability               #
-############################################################
+IMPORT Memory
+IMPORT APU
 
+# ============================================================================
+# CONSTANTS
+# ============================================================================
 
-########################################
-# SECTION 0 — NUMERIC & BIT CONVENTIONS
-########################################
-#  • All integer registers are 8-bit unless stated.
-#  • Memory is 64 KiB ($0x0000$..$0xFFFF$).
-#  • "$" marks hexadecimal in comments; arithmetic is done modulo 8 or 16 bits as stated.
-#  • The 6502 sets flags NV-BDIZC (bit 7..0).
-#  • "page" means a 256-byte block (high byte of an address).
-#  • "page crossing" = effective address crosses a 256-byte boundary after adding X/Y.
+CONST MASK_BYTE: u8 = 0xFF
+CONST MASK_WORD: u16 = 0xFFFF
 
-CONST MASK_BYTE     = 0xFF
-CONST MASK_WORD     = 0xFFFF
+# Status register flags (P register)
+CONST FLAG_N: u8 = 0x80   # Negative
+CONST FLAG_V: u8 = 0x40   # Overflow
+CONST FLAG_U: u8 = 0x20   # Unused (always 1)
+CONST FLAG_B: u8 = 0x10   # Break command
+CONST FLAG_D: u8 = 0x08   # Decimal mode (disabled on NES)
+CONST FLAG_I: u8 = 0x04   # IRQ disable
+CONST FLAG_Z: u8 = 0x02   # Zero
+CONST FLAG_C: u8 = 0x01   # Carry
 
-# Status bits:
-CONST FLAG_N = 0x80   # Negative
-CONST FLAG_V = 0x40   # Overflow
-CONST FLAG_X = 0x20   # Unused/ignored bit in P (always reads as set when pushed)
-CONST FLAG_B = 0x10   # Break (software)
-CONST FLAG_D = 0x08   # Decimal (BCD arith)
-CONST FLAG_I = 0x04   # IRQ Disable
-CONST FLAG_Z = 0x02   # Zero
-CONST FLAG_C = 0x01   # Carry
+# Interrupt vectors
+CONST VEC_NMI: u16 = 0xFFFA
+CONST VEC_RESET: u16 = 0xFFFC
+CONST VEC_IRQ: u16 = 0xFFFE
 
-# Interrupt vectors:
-CONST VEC_NMI   = 0xFFFA
-CONST VEC_RESET = 0xFFFC
-CONST VEC_IRQ   = 0xFFFE   # also used by BRK
+# Stack base address
+CONST STACK_BASE: u16 = 0x0100
 
+# DMA constants
+CONST OAM_DMA_CYCLES: u16 = 513  # 512 + 1 for odd cycle alignment
 
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
 
-######################################
-# SECTION 1 — CPU STATE & THE "BUS"
-######################################
-STRUCT CPU:
-    A  : u8         # Accumulator
-    X  : u8         # Index X
-    Y  : u8         # Index Y
-    P  : u8         # Status NV-BDIZC
-    SP : u8         # Stack Pointer (stack at $0100$..$01FF$)
-    PC : u16        # Program Counter
-
-    cycles : u64    # total elapsed cycles (running sum)
-    running: bool   # main loop latch
-
-    pending_NMI : bool
-    pending_IRQ : bool        # level IRQ (maskable by I)
-
+STRUCT CPU
+    # Registers
+    A: u8          # Accumulator
+    X: u8          # Index register X
+    Y: u8          # Index register Y
+    P: u8          # Status register
+    SP: u8         # Stack pointer (0x01FF-0x0100)
+    PC: u16        # Program counter
+    
+    # Timing
+    cycles: u64    # Total cycles executed
+    stall_cycles: u16  # Cycles to stall (for DMA, etc.)
+    
+    # Interrupt state
+    nmi_pending: bool
+    nmi_edge_detected: bool
+    irq_pending: bool
+    
+    # Emulation state
+    running: bool
+    
+    # Memory interface
+    memory: PTR[Memory.MemoryBus]
+    
+    # Connected components
+    apu: PTR[APU.APU]
 END
 
+STRUCT AddressingResult
+    address: u16
+    value: u8
+    page_crossed: bool
+    mode: string
+END
 
-# === MEMORY/BUS ==========================================
-# Memory map: by default a flat 64 KiB RAM. Hook points allow MMIO/cartridge.
+# ============================================================================
+# CPU INITIALIZATION
+# ============================================================================
 
-ARRAY MEMORY[0..65535] : u8 = {0}   # default zeroed
+FUNCTION cpu_create(memory: PTR[Memory.MemoryBus], apu: PTR[APU.APU]) -> CPU
+    VAR cpu: CPU
+    
+    cpu.memory = memory
+    cpu.apu = apu
+    cpu.running = false
+    
+    # Initial register state
+    cpu.A = 0
+    cpu.X = 0
+    cpu.Y = 0
+    cpu.P = FLAG_U OR FLAG_I  # Unused bit always set, interrupts disabled
+    cpu.SP = 0xFD
+    cpu.PC = 0
+    
+    cpu.cycles = 0
+    cpu.stall_cycles = 0
+    
+    cpu.nmi_pending = false
+    cpu.nmi_edge_detected = false
+    cpu.irq_pending = false
+    
+    RETURN cpu
+END
 
-# Optional user hooks (can be "null"/unset):
-FUNCTION BUS_READ_HOOK(addr: u16)  RETURNS (has_value: bool, value: u8)
-FUNCTION BUS_WRITE_HOOK(addr: u16, value: u8) RETURNS (handled: bool)
+# ============================================================================
+# MEMORY ACCESS
+# ============================================================================
 
-# 8-bit read
-FUNCTION READ8(addr: u16) RETURNS u8:
-    addr := addr AND MASK_WORD
-    (has, val) := BUS_READ_HOOK(addr)  IF set
-    IF has == true:
-        RETURN val
-    ELSE:
-        RETURN MEMORY[addr]
+FUNCTION read_byte(cpu: PTR[CPU], address: u16) -> u8
+    RETURN Memory.read_byte(cpu.memory, address)
+END
+
+FUNCTION write_byte(cpu: PTR[CPU], address: u16, value: u8)
+    Memory.write_byte(cpu.memory, address, value)
+    
+    # Check for special addresses
+    IF address == 0x4014 THEN
+        # OAM DMA
+        perform_oam_dma(cpu, value)
+    ELSE IF address >= 0x4000 AND address <= 0x4017 THEN
+        # APU registers
+        APU.apu_write_register(cpu.apu, address, value)
     END
 END
 
-# 8-bit write
-FUNCTION WRITE8(addr: u16, value: u8):
-    addr  := addr  AND MASK_WORD
-    value := value AND MASK_BYTE
-    handled := BUS_WRITE_HOOK(addr, value)  IF set
-    IF handled != true:
-        MEMORY[addr] := value
+FUNCTION read_word(cpu: PTR[CPU], address: u16) -> u16
+    VAR lo: u8 = read_byte(cpu, address)
+    VAR hi: u8 = read_byte(cpu, address + 1)
+    RETURN (CAST(u16, hi) << 8) OR lo
+END
+
+FUNCTION read_word_zero_page(cpu: PTR[CPU], address: u8) -> u16
+    VAR lo: u8 = read_byte(cpu, address)
+    VAR hi: u8 = read_byte(cpu, (address + 1) AND 0xFF)  # Wrap within zero page
+    RETURN (CAST(u16, hi) << 8) OR lo
+END
+
+FUNCTION read_word_bug(cpu: PTR[CPU], address: u16) -> u16
+    # 6502 JMP indirect bug: doesn't cross page boundaries correctly
+    VAR lo: u8 = read_byte(cpu, address)
+    VAR hi_addr: u16
+    IF (address AND 0xFF) == 0xFF THEN
+        hi_addr = address AND 0xFF00  # Wrap to beginning of page
+    ELSE
+        hi_addr = address + 1
+    END
+    VAR hi: u8 = read_byte(cpu, hi_addr)
+    RETURN (CAST(u16, hi) << 8) OR lo
+END
+
+# ============================================================================
+# STACK OPERATIONS
+# ============================================================================
+
+FUNCTION push_byte(cpu: PTR[CPU], value: u8)
+    write_byte(cpu, STACK_BASE OR cpu.SP, value)
+    cpu.SP = (cpu.SP - 1) AND 0xFF
+END
+
+FUNCTION pop_byte(cpu: PTR[CPU]) -> u8
+    cpu.SP = (cpu.SP + 1) AND 0xFF
+    RETURN read_byte(cpu, STACK_BASE OR cpu.SP)
+END
+
+FUNCTION push_word(cpu: PTR[CPU], value: u16)
+    push_byte(cpu, (value >> 8) AND 0xFF)  # High byte first
+    push_byte(cpu, value AND 0xFF)         # Low byte second
+END
+
+FUNCTION pop_word(cpu: PTR[CPU]) -> u16
+    VAR lo: u8 = pop_byte(cpu)
+    VAR hi: u8 = pop_byte(cpu)
+    RETURN (CAST(u16, hi) << 8) OR lo
+END
+
+# ============================================================================
+# FLAG OPERATIONS
+# ============================================================================
+
+FUNCTION set_flag(cpu: PTR[CPU], flag: u8)
+    cpu.P = cpu.P OR flag
+END
+
+FUNCTION clear_flag(cpu: PTR[CPU], flag: u8)
+    cpu.P = cpu.P AND (NOT flag)
+END
+
+FUNCTION get_flag(cpu: PTR[CPU], flag: u8) -> bool
+    RETURN (cpu.P AND flag) != 0
+END
+
+FUNCTION set_flag_value(cpu: PTR[CPU], flag: u8, value: bool)
+    IF value THEN
+        set_flag(cpu, flag)
+    ELSE
+        clear_flag(cpu, flag)
     END
 END
 
-# Read two bytes little-endian from arbitrary address (wraps naturally page-to-page)
-FUNCTION READ16(addr: u16) RETURNS u16:
-    lo := READ8(addr)
-    hi := READ8(addr + 1)
-    RETURN ((hi << 8) OR lo)
+FUNCTION update_zero_negative(cpu: PTR[CPU], value: u8)
+    set_flag_value(cpu, FLAG_Z, value == 0)
+    set_flag_value(cpu, FLAG_N, (value AND 0x80) != 0)
 END
 
-# Read two bytes little-endian from ZERO PAGE with 8-bit wrap ($FF+1→$00)
-FUNCTION READ16_ZP(zp_addr: u8) RETURNS u16:
-    lo := READ8(zp_addr)
-    hi := READ8((zp_addr + 1) AND 0xFF)
-    RETURN ((hi << 8) OR lo)
+# ============================================================================
+# ADDRESSING MODES
+# ============================================================================
+
+FUNCTION address_immediate(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    result.address = cpu.PC
+    result.value = read_byte(cpu, cpu.PC)
+    result.page_crossed = false
+    result.mode = "immediate"
+    cpu.PC = cpu.PC + 1
+    RETURN result
 END
 
-# Stack helpers ($0100$ base)
-FUNCTION PUSH8(C: CPU, value: u8):
-    WRITE8(0x0100 OR C.SP, value)
-    C.SP := (C.SP - 1) AND 0xFF
+FUNCTION address_zero_page(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    result.address = read_byte(cpu, cpu.PC)
+    result.value = read_byte(cpu, result.address)
+    result.page_crossed = false
+    result.mode = "zeropage"
+    cpu.PC = cpu.PC + 1
+    RETURN result
 END
 
-FUNCTION POP8(C: CPU) RETURNS u8:
-    C.SP := (C.SP + 1) AND 0xFF
-    RETURN READ8(0x0100 OR C.SP)
+FUNCTION address_zero_page_x(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    VAR base: u8 = read_byte(cpu, cpu.PC)
+    result.address = (base + cpu.X) AND 0xFF
+    result.value = read_byte(cpu, result.address)
+    result.page_crossed = false
+    result.mode = "zeropage,x"
+    cpu.PC = cpu.PC + 1
+    RETURN result
 END
 
-FUNCTION PUSH16(C: CPU, value: u16):
-    # Push high then low? 6502 pushes PC high, then low. We encode that explicitly where needed.
-    hi := (value >> 8) AND 0xFF
-    lo := value AND 0xFF
-    PUSH8(C, hi)
-    PUSH8(C, lo)
+FUNCTION address_zero_page_y(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    VAR base: u8 = read_byte(cpu, cpu.PC)
+    result.address = (base + cpu.Y) AND 0xFF
+    result.value = read_byte(cpu, result.address)
+    result.page_crossed = false
+    result.mode = "zeropage,y"
+    cpu.PC = cpu.PC + 1
+    RETURN result
 END
 
-FUNCTION POP16(C: CPU) RETURNS u16:
-    lo := POP8(C)
-    hi := POP8(C)
-    RETURN ((hi << 8) OR lo)
+FUNCTION address_absolute(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    result.address = read_word(cpu, cpu.PC)
+    result.value = read_byte(cpu, result.address)
+    result.page_crossed = false
+    result.mode = "absolute"
+    cpu.PC = cpu.PC + 2
+    RETURN result
 END
 
+FUNCTION address_absolute_x(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    VAR base: u16 = read_word(cpu, cpu.PC)
+    result.address = (base + cpu.X) AND 0xFFFF
+    result.value = read_byte(cpu, result.address)
+    result.page_crossed = ((base AND 0xFF00) != (result.address AND 0xFF00))
+    result.mode = "absolute,x"
+    cpu.PC = cpu.PC + 2
+    RETURN result
+END
 
+FUNCTION address_absolute_y(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    VAR base: u16 = read_word(cpu, cpu.PC)
+    result.address = (base + cpu.Y) AND 0xFFFF
+    result.value = read_byte(cpu, result.address)
+    result.page_crossed = ((base AND 0xFF00) != (result.address AND 0xFF00))
+    result.mode = "absolute,y"
+    cpu.PC = cpu.PC + 2
+    RETURN result
+END
 
-#########################################
-# SECTION 2 — FLAGS (P) CONVENIENCE
-#########################################
-FUNCTION SET_ZN(C: CPU, value8: u8):
-    IF (value8 AND 0xFF) == 0: C.P := (C.P OR FLAG_Z)
-    ELSE:                      C.P := (C.P AND (NOT FLAG_Z))
+FUNCTION address_indirect(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    VAR ptr: u16 = read_word(cpu, cpu.PC)
+    result.address = read_word_bug(cpu, ptr)  # JMP bug
+    result.value = 0  # Not used for JMP
+    result.page_crossed = false
+    result.mode = "indirect"
+    cpu.PC = cpu.PC + 2
+    RETURN result
+END
+
+FUNCTION address_indexed_indirect(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    VAR base: u8 = read_byte(cpu, cpu.PC)
+    VAR ptr: u8 = (base + cpu.X) AND 0xFF
+    result.address = read_word_zero_page(cpu, ptr)
+    result.value = read_byte(cpu, result.address)
+    result.page_crossed = false
+    result.mode = "(indirect,x)"
+    cpu.PC = cpu.PC + 1
+    RETURN result
+END
+
+FUNCTION address_indirect_indexed(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    VAR ptr: u8 = read_byte(cpu, cpu.PC)
+    VAR base: u16 = read_word_zero_page(cpu, ptr)
+    result.address = (base + cpu.Y) AND 0xFFFF
+    result.value = read_byte(cpu, result.address)
+    result.page_crossed = ((base AND 0xFF00) != (result.address AND 0xFF00))
+    result.mode = "(indirect),y"
+    cpu.PC = cpu.PC + 1
+    RETURN result
+END
+
+FUNCTION address_relative(cpu: PTR[CPU]) -> AddressingResult
+    VAR result: AddressingResult
+    VAR offset: u8 = read_byte(cpu, cpu.PC)
+    cpu.PC = cpu.PC + 1
+    
+    # Sign extend offset
+    VAR signed_offset: i16
+    IF (offset AND 0x80) != 0 THEN
+        signed_offset = CAST(i16, offset) OR 0xFF00
+    ELSE
+        signed_offset = CAST(i16, offset)
     END
-    IF (value8 AND 0x80) != 0: C.P := (C.P OR FLAG_N)
-    ELSE:                      C.P := (C.P AND (NOT FLAG_N))
-    END
+    
+    result.address = (CAST(i16, cpu.PC) + signed_offset) AND 0xFFFF
+    result.value = 0  # Not used for branches
+    result.page_crossed = ((cpu.PC AND 0xFF00) != (result.address AND 0xFF00))
+    result.mode = "relative"
+    RETURN result
 END
 
-FUNCTION GET_FLAG(C: CPU, mask: u8) RETURNS bool:
-    RETURN ((C.P AND mask) != 0)
+# ============================================================================
+# ARITHMETIC OPERATIONS
+# ============================================================================
+
+FUNCTION adc(cpu: PTR[CPU], value: u8)
+    VAR carry: u16 = get_flag(cpu, FLAG_C) ? 1 : 0
+    VAR sum: u16 = CAST(u16, cpu.A) + CAST(u16, value) + carry
+    
+    # Overflow detection
+    VAR overflow: bool = ((cpu.A XOR value) AND 0x80) == 0 AND 
+                        ((cpu.A XOR (sum AND 0xFF)) AND 0x80) != 0
+    
+    cpu.A = sum AND 0xFF
+    set_flag_value(cpu, FLAG_C, sum > 0xFF)
+    set_flag_value(cpu, FLAG_V, overflow)
+    update_zero_negative(cpu, cpu.A)
 END
 
-FUNCTION SET_FLAG(C: CPU, mask: u8, on: bool):
-    IF on:  C.P := (C.P OR  mask)
-    ELSE:   C.P := (C.P AND (NOT mask))
-    END
+FUNCTION sbc(cpu: PTR[CPU], value: u8)
+    # SBC is implemented as ADC with one's complement
+    adc(cpu, value XOR 0xFF)
 END
 
-
-
-########################################################
-# SECTION 3 — ADDRESSING MODES (effective address/val)
-########################################################
-# Each resolver returns:
-#   (mode_kind, eff_addr, fetched, page_crossed)
-# Where:
-#   - eff_addr is the effective 16-bit address (if applicable)
-#   - fetched is the immediate/accumulator value when relevant
-#   - page_crossed is true when the X/Y addition crossed a page
-
-# Helpers:
-FUNCTION PAGE(addr: u16) RETURNS u8: RETURN ((addr >> 8) AND 0xFF) END
-
-# --- IMPLIED / ACCUMULATOR --------------------------------
-FUNCTION AM_IMPL(C: CPU) RETURNS (kind: "impl", addr: u16, val: u8, crossed: bool):
-    RETURN ("impl", 0, 0, false)
+FUNCTION compare(cpu: PTR[CPU], reg: u8, value: u8)
+    VAR result: u16 = CAST(u16, reg) - CAST(u16, value)
+    set_flag_value(cpu, FLAG_C, reg >= value)
+    update_zero_negative(cpu, result AND 0xFF)
 END
 
-FUNCTION AM_ACC(C: CPU) RETURNS (kind: "A", addr: u16, val: u8, crossed: bool):
-    RETURN ("A", 0, C.A, false)
+# ============================================================================
+# BITWISE OPERATIONS
+# ============================================================================
+
+FUNCTION and_op(cpu: PTR[CPU], value: u8)
+    cpu.A = cpu.A AND value
+    update_zero_negative(cpu, cpu.A)
 END
 
-# --- IMMEDIATE --------------------------------------------
-FUNCTION AM_IMM(C: CPU) RETURNS (kind, addr, val, crossed):
-    val := READ8(C.PC) ; C.PC := (C.PC + 1) AND 0xFFFF
-    RETURN ("#", 0, val, false)
+FUNCTION ora_op(cpu: PTR[CPU], value: u8)
+    cpu.A = cpu.A OR value
+    update_zero_negative(cpu, cpu.A)
 END
 
-# --- ZEROPAGE ----------------------------------------------
-FUNCTION AM_ZP(C: CPU) RETURNS (...):
-    zp := READ8(C.PC) ; C.PC := (C.PC + 1) AND 0xFFFF
-    RETURN ("zpg", zp, READ8(zp), false)
+FUNCTION eor_op(cpu: PTR[CPU], value: u8)
+    cpu.A = cpu.A XOR value
+    update_zero_negative(cpu, cpu.A)
 END
 
-FUNCTION AM_ZPX(C: CPU) RETURNS (...):
-    zp := READ8(C.PC) ; C.PC := (C.PC + 1) AND 0xFFFF
-    eff := (zp + C.X) AND 0xFF
-    RETURN ("zpg,X", eff, READ8(eff), false)
+FUNCTION bit_op(cpu: PTR[CPU], value: u8)
+    VAR result: u8 = cpu.A AND value
+    set_flag_value(cpu, FLAG_Z, result == 0)
+    set_flag_value(cpu, FLAG_V, (value AND 0x40) != 0)
+    set_flag_value(cpu, FLAG_N, (value AND 0x80) != 0)
 END
 
-FUNCTION AM_ZPY(C: CPU) RETURNS (...):
-    zp := READ8(C.PC) ; C.PC := (C.PC + 1) AND 0xFFFF
-    eff := (zp + C.Y) AND 0xFF
-    RETURN ("zpg,Y", eff, READ8(eff), false)
+# ============================================================================
+# SHIFT AND ROTATE OPERATIONS
+# ============================================================================
+
+FUNCTION asl_op(cpu: PTR[CPU], value: u8) -> u8
+    set_flag_value(cpu, FLAG_C, (value AND 0x80) != 0)
+    VAR result: u8 = (value << 1) AND 0xFF
+    update_zero_negative(cpu, result)
+    RETURN result
 END
 
-# --- ABSOLUTE ----------------------------------------------
-FUNCTION AM_ABS(C: CPU) RETURNS (...):
-    addr := READ16(C.PC) ; C.PC := (C.PC + 2) AND 0xFFFF
-    RETURN ("abs", addr, READ8(addr), false)
+FUNCTION lsr_op(cpu: PTR[CPU], value: u8) -> u8
+    set_flag_value(cpu, FLAG_C, (value AND 0x01) != 0)
+    VAR result: u8 = value >> 1
+    update_zero_negative(cpu, result)
+    RETURN result
 END
 
-FUNCTION AM_ABX(C: CPU) RETURNS (...):
-    base := READ16(C.PC) ; C.PC := (C.PC + 2) AND 0xFFFF
-    eff  := (base + C.X) AND 0xFFFF
-    crossed := (PAGE(base) != PAGE(eff))
-    RETURN ("abs,X", eff, READ8(eff), crossed)
+FUNCTION rol_op(cpu: PTR[CPU], value: u8) -> u8
+    VAR carry: u8 = get_flag(cpu, FLAG_C) ? 1 : 0
+    set_flag_value(cpu, FLAG_C, (value AND 0x80) != 0)
+    VAR result: u8 = ((value << 1) OR carry) AND 0xFF
+    update_zero_negative(cpu, result)
+    RETURN result
 END
 
-FUNCTION AM_ABY(C: CPU) RETURNS (...):
-    base := READ16(C.PC) ; C.PC := (C.PC + 2) AND 0xFFFF
-    eff  := (base + C.Y) AND 0xFFFF
-    crossed := (PAGE(base) != PAGE(eff))
-    RETURN ("abs,Y", eff, READ8(eff), crossed)
+FUNCTION ror_op(cpu: PTR[CPU], value: u8) -> u8
+    VAR carry: u8 = get_flag(cpu, FLAG_C) ? 0x80 : 0
+    set_flag_value(cpu, FLAG_C, (value AND 0x01) != 0)
+    VAR result: u8 = (value >> 1) OR carry
+    update_zero_negative(cpu, result)
+    RETURN result
 END
 
-# --- INDIRECT (JMP only) with 6502 wraparound bug ----------
-FUNCTION AM_IND(C: CPU) RETURNS (...):
-    ptr := READ16(C.PC) ; C.PC := (C.PC + 2) AND 0xFFFF
-    lo := READ8(ptr)
-    # Bug: high byte wraps within the same page (do not cross to next page)
-    hi_addr := (ptr AND 0xFF00) OR ((ptr + 1) AND 0x00FF)
-    hi := READ8(hi_addr)
-    dest := ((hi << 8) OR lo)
-    RETURN ("ind", dest, 0, false)
+# ============================================================================
+# INCREMENT/DECREMENT OPERATIONS
+# ============================================================================
+
+FUNCTION inc_op(cpu: PTR[CPU], value: u8) -> u8
+    VAR result: u8 = (value + 1) AND 0xFF
+    update_zero_negative(cpu, result)
+    RETURN result
 END
 
-# --- (X,ind) : pre-indexed zero-page -----------------------
-FUNCTION AM_XIND(C: CPU) RETURNS (...):
-    zp := READ8(C.PC) ; C.PC := (C.PC + 1) AND 0xFFFF
-    ptr := (zp + C.X) AND 0xFF
-    eff := READ16_ZP(ptr)
-    RETURN ("X,ind", eff, READ8(eff), false)
+FUNCTION dec_op(cpu: PTR[CPU], value: u8) -> u8
+    VAR result: u8 = (value - 1) AND 0xFF
+    update_zero_negative(cpu, result)
+    RETURN result
 END
 
-# --- (ind),Y : post-indexed zero-page ----------------------
-FUNCTION AM_INDY(C: CPU) RETURNS (...):
-    zp   := READ8(C.PC) ; C.PC := (C.PC + 1) AND 0xFFFF
-    base := READ16_ZP(zp)
-    eff  := (base + C.Y) AND 0xFFFF
-    crossed := (PAGE(base) != PAGE(eff))
-    RETURN ("ind,Y", eff, READ8(eff), crossed)
-END
+# ============================================================================
+# BRANCH OPERATIONS
+# ============================================================================
 
-# --- RELATIVE (branches) ----------------------------------
-FUNCTION AM_REL(C: CPU) RETURNS (...):
-    off8 := READ8(C.PC) ; C.PC := (C.PC + 1) AND 0xFFFF
-    # signed 8-bit: $-128..+127$
-    signed := (off8 >= 0x80) ? (off8 - 256) : off8
-    target := (C.PC + signed) AND 0xFFFF
-    RETURN ("rel", target, 0, false)
-END
-
-
-
-######################################################
-# SECTION 4 — DISPATCHUCTION BYTES & CYCLES DEFINITIONS
-######################################################
-# Instruction SIZE (bytes) is determined entirely by addressing mode.
-FUNCTION DISPATCH_BYTES_FOR_MODE(mode: string) RETURNS u8:
-    IF mode IN {"impl", "A"}: RETURN 1
-    IF mode IN {"#", "zpg", "zpg,X", "zpg,Y", "X,ind", "ind,Y", "rel"}: RETURN 2
-    IF mode IN {"abs", "abs,X", "abs,Y", "ind"}: RETURN 3
-    ABORT("unknown mode")
-END
-
-# BASE CYCLES TABLE (official NMOS 6502). Uses the convention:
-#   • return (base_cycles, adds_on_page_cross) where the latter is true
-#     only when the mode causes an extra cycle if a page is crossed.
-FUNCTION CYCLES_BASE(mnemonic: string, mode: string) RETURNS (u8, bool):
-    # ALU loads (ADC, AND, CMP, EOR, LDA, ORA, SBC) and also CP* & BIT as noted:
-    IF mnemonic IN {"ADC","AND","CMP","EOR","LDA","ORA","SBC"}:
-        SWITCH mode:
-            CASE "#":     RETURN (2,false)
-            CASE "zpg":   RETURN (3,false)
-            CASE "zpg,X": RETURN (4,false)
-            CASE "abs":   RETURN (4,false)
-            CASE "abs,X": RETURN (4,true)   # +1 on page cross
-            CASE "abs,Y": RETURN (4,true)
-            CASE "X,ind": RETURN (6,false)
-            CASE "ind,Y": RETURN (5,true)
+FUNCTION branch(cpu: PTR[CPU], condition: bool) -> u8
+    VAR addr_result: AddressingResult = address_relative(cpu)
+    
+    IF condition THEN
+        VAR cycles: u8 = 1  # Base cycle for taken branch
+        
+        IF addr_result.page_crossed THEN
+            cycles = cycles + 1  # Page crossing penalty
         END
-    IF mnemonic == "STA":
-        SWITCH mode:
-            CASE "zpg":   RETURN (3,false)
-            CASE "zpg,X": RETURN (4,false)
-            CASE "abs":   RETURN (4,false)
-            CASE "abs,X": RETURN (5,false)
-            CASE "abs,Y": RETURN (5,false)
-            CASE "X,ind": RETURN (6,false)
-            CASE "ind,Y": RETURN (6,false)
-        END
-    IF mnemonic == "STX":
-        SWITCH mode:
-            CASE "zpg":   RETURN (3,false)
-            CASE "abs":   RETURN (4,false)
-            CASE "zpg,Y": RETURN (4,false)
-        END
-    IF mnemonic == "STY":
-        SWITCH mode:
-            CASE "zpg":   RETURN (3,false)
-            CASE "abs":   RETURN (4,false)
-            CASE "zpg,X": RETURN (4,false)
-        END
-    IF mnemonic == "LDX":
-        SWITCH mode:
-            CASE "#":     RETURN (2,false)
-            CASE "zpg":   RETURN (3,false)
-            CASE "zpg,Y": RETURN (4,false)
-            CASE "abs":   RETURN (4,false)
-            CASE "abs,Y": RETURN (4,true)
-        END
-    IF mnemonic == "LDY":
-        SWITCH mode:
-            CASE "#":     RETURN (2,false)
-            CASE "zpg":   RETURN (3,false)
-            CASE "zpg,X": RETURN (4,false)
-            CASE "abs":   RETURN (4,false)
-            CASE "abs,X": RETURN (4,true)
-        END
-    IF mnemonic IN {"ASL","LSR","ROL","ROR"}:
-        SWITCH mode:
-            CASE "A":      RETURN (2,false)
-            CASE "zpg":    RETURN (5,false)
-            CASE "zpg,X":  RETURN (6,false)
-            CASE "abs":    RETURN (6,false)
-            CASE "abs,X":  RETURN (7,false)
-        END
-    IF mnemonic IN {"INC","DEC"}:
-        SWITCH mode:
-            CASE "zpg":    RETURN (5,false)
-            CASE "zpg,X":  RETURN (6,false)
-            CASE "abs":    RETURN (6,false)
-            CASE "abs,X":  RETURN (7,false)
-        END
-    IF mnemonic == "BIT":
-        SWITCH mode:
-            CASE "zpg": RETURN (3,false)
-            CASE "abs": RETURN (4,false)
-        END
-    IF mnemonic IN {"BPL","BMI","BVC","BVS","BCC","BCS","BNE","BEQ"}:
-        # 2 +1 if taken +1 if taken and page crossed
-        RETURN (2,false)
-    IF mnemonic == "JMP":
-        SWITCH mode:
-            CASE "abs": RETURN (3,false)
-            CASE "ind": RETURN (5,false)
-        END
-    IF mnemonic == "JSR": RETURN (6,false)    # abs only
-    IF mnemonic == "BRK": RETURN (7,false)
-    IF mnemonic == "RTI": RETURN (6,false)
-    IF mnemonic == "RTS": RETURN (6,false)
-    IF mnemonic IN {"CLC","SEC","CLI","SEI","CLV","CLD","SED","NOP"}:
-        RETURN (2,false)
-    IF mnemonic IN {"TAX","TXA","TAY","TYA","TSX","TXS","DEX","DEY","INX","INY"}:
-        RETURN (2,false)
-    IF mnemonic == "CPX" OR mnemonic == "CPY":
-        SWITCH mode:
-            CASE "#":   RETURN (2,false)
-            CASE "zpg": RETURN (3,false)
-            CASE "abs": RETURN (4,false)
-        END
-    ABORT("cycles: unhandled mnemonic/mode: " + mnemonic + " " + mode)
-END
-
-
-
-###############################################################
-# SECTION 5 — ALU CORE (BINARY + DECIMAL) AND COMMON HELPERS
-###############################################################
-# Binary add with carry; returns result and sets NVZC as per 6502
-FUNCTION ADC_BINARY(C: CPU, M: u8):
-    carry_in := GET_FLAG(C, FLAG_C) ? 1 : 0
-    a := C.A
-    sum9 := a + M + carry_in                      # conceptual 9-bit sum
-    result := sum9 AND 0xFF
-    # Flags:
-    SET_FLAG(C, FLAG_C, (sum9 > 0xFF))
-    SET_ZN(C, result)
-    # Overflow: when the sign of A and M are same, but differ from result
-    overflow := (((a XOR M) AND 0x80) == 0) AND (((a XOR result) AND 0x80) != 0)
-    SET_FLAG(C, FLAG_V, overflow)
-    C.A := result
-END
-
-# Decimal add (NMOS 6502 BCD semantics)
-FUNCTION ADC_DECIMAL(C: CPU, M: u8):
-    carry_in := GET_FLAG(C, FLAG_C) ? 1 : 0
-    a := C.A
-    # Perform binary add first to compute V per NMOS behavior
-    bin_sum := (a + M + carry_in)
-    bin_res := bin_sum AND 0xFF
-    overflow := (((a XOR M) AND 0x80) == 0) AND (((a XOR bin_res) AND 0x80) != 0)
-    # BCD adjust
-    lo := (a AND 0x0F) + (M AND 0x0F) + carry_in
-    adjust_lo := 0
-    IF lo > 9: lo := lo + 6 ; adjust_lo := 1 END
-    hi := (a >> 4) + (M >> 4) + (adjust_lo)
-    carry_out := false
-    IF hi > 9: hi := hi + 6 ; carry_out := true END
-    result := ((hi << 4) OR (lo AND 0x0F)) AND 0xFF
-    # Flags
-    SET_FLAG(C, FLAG_C, carry_out)
-    SET_ZN(C, result)
-    SET_FLAG(C, FLAG_V, overflow)
-    C.A := result
-END
-
-FUNCTION SBC_BINARY(C: CPU, M: u8):
-    # 6502 SBC does A := A + (~M) + C, and C means "no borrow"
-    carry_in := GET_FLAG(C, FLAG_C) ? 1 : 0
-    a := C.A
-    m_inv := M XOR 0xFF
-    sum9 := a + m_inv + carry_in
-    result := sum9 AND 0xFF
-    SET_FLAG(C, FLAG_C, (sum9 > 0xFF))         # C=1 means no borrow
-    SET_ZN(C, result)
-    overflow := (((a XOR m_inv) AND 0x80) == 0) AND (((a XOR result) AND 0x80) != 0)
-    SET_FLAG(C, FLAG_V, overflow)
-    C.A := result
-END
-
-FUNCTION SBC_DECIMAL(C: CPU, M: u8):
-    # Binary part for V
-    carry_in := GET_FLAG(C, FLAG_C) ? 1 : 0
-    a := C.A
-    bin_diff := a - M - (1 - carry_in)
-    bin_res := bin_diff AND 0xFF
-    overflow := (((a XOR M) AND 0x80) != 0) AND (((a XOR bin_res) AND 0x80) != 0)
-    # BCD adjust (NMOS rules)
-    a_lo := a AND 0x0F
-    m_lo := M AND 0x0F
-    borrow := (1 - carry_in)
-    lo := a_lo - m_lo - borrow
-    adj_lo := 0
-    if_borrow_lo := (lo < 0)
-    IF if_borrow_lo: lo := lo - 6 END
-    hi := (a >> 4) - (M >> 4) - (if_borrow_lo ? 1 : 0)
-    carry_out := true
-    IF hi < 0: hi := hi - 6 ; carry_out := false END
-    result := ((hi << 4) OR (lo AND 0x0F)) AND 0xFF
-    SET_FLAG(C, FLAG_C, carry_out)     # C=1 means no borrow
-    SET_ZN(C, result)
-    SET_FLAG(C, FLAG_V, overflow)
-    C.A := result
-END
-
-# Read-Modify-Write helper pattern (ASL/LSR/ROL/ROR/INC/DEC on memory)
-FUNCTION RMW(C: CPU, addr: u16, op: function(u8)->(u8)):
-    val := READ8(addr)
-    new := op(val)
-    WRITE8(addr, new)
-    RETURN new
-END
-
-# Compare helper (CMP/CPX/CPY)
-FUNCTION DO_CMP(C: CPU, reg_val: u8, M: u8):
-    diff := (reg_val - M) AND 0x1FF
-    SET_FLAG(C, FLAG_C, reg_val >= M)
-    SET_ZN(C, diff AND 0xFF)
-END
-
-
-
-#############################################
-# SECTION 6 — MICRO-OPS FOR EACH MNEMONIC
-#############################################
-# These micro-ops do not fetch operands; addressing mode resolvers already did.
-# Many ops are implemented generically.
-
-# ---- Loads ------------------------------------------------
-FUNCTION OP_LDA(C: CPU, val: u8):
-    C.A := val AND 0xFF
-    SET_ZN(C, C.A)
-END
-
-FUNCTION OP_LDX(C: CPU, val: u8):
-    C.X := val AND 0xFF
-    SET_ZN(C, C.X)
-END
-
-FUNCTION OP_LDY(C: CPU, val: u8):
-    C.Y := val AND 0xFF
-    SET_ZN(C, C.Y)
-END
-
-# ---- Stores -----------------------------------------------
-FUNCTION OP_STA(C: CPU, addr: u16): WRITE8(addr, C.A) END
-FUNCTION OP_STX(C: CPU, addr: u16): WRITE8(addr, C.X) END
-FUNCTION OP_STY(C: CPU, addr: u16): WRITE8(addr, C.Y) END
-
-# ---- ALU logic --------------------------------------------
-FUNCTION OP_AND(C: CPU, val: u8): C.A := C.A AND val ; SET_ZN(C, C.A) END
-FUNCTION OP_ORA(C: CPU, val: u8): C.A := C.A OR  val ; SET_ZN(C, C.A) END
-FUNCTION OP_EOR(C: CPU, val: u8): C.A := C.A XOR val ; SET_ZN(C, C.A) END
-
-# ---- ADC/SBC (with D check) -------------------------------
-FUNCTION OP_ADC(C: CPU, val: u8):
-    IF GET_FLAG(C, FLAG_D): ADC_DECIMAL(C, val)
-    ELSE:                   ADC_BINARY (C, val)
+        
+        cpu.PC = addr_result.address
+        RETURN cycles
+    ELSE
+        RETURN 0
     END
 END
 
-FUNCTION OP_SBC(C: CPU, val: u8):
-    IF GET_FLAG(C, FLAG_D): SBC_DECIMAL(C, val)
-    ELSE:                   SBC_BINARY (C, val)
+# ============================================================================
+# INTERRUPT HANDLING
+# ============================================================================
+
+FUNCTION trigger_nmi(cpu: PTR[CPU])
+    cpu.nmi_pending = true
+    cpu.nmi_edge_detected = true
+END
+
+FUNCTION trigger_irq(cpu: PTR[CPU])
+    cpu.irq_pending = true
+END
+
+FUNCTION handle_interrupt(cpu: PTR[CPU], vector: u16, is_brk: bool)
+    # Push PC
+    push_word(cpu, cpu.PC)
+    
+    # Push status with B flag
+    VAR status: u8 = cpu.P OR FLAG_U  # Unused flag always set
+    IF is_brk THEN
+        status = status OR FLAG_B
+    ELSE
+        status = status AND (NOT FLAG_B)
+    END
+    push_byte(cpu, status)
+    
+    # Set interrupt disable
+    set_flag(cpu, FLAG_I)
+    
+    # Jump to vector
+    cpu.PC = read_word(cpu, vector)
+END
+
+FUNCTION check_interrupts(cpu: PTR[CPU])
+    # NMI has priority over IRQ
+    IF cpu.nmi_pending AND cpu.nmi_edge_detected THEN
+        cpu.nmi_pending = false
+        cpu.nmi_edge_detected = false
+        handle_interrupt(cpu, VEC_NMI, false)
+        cpu.cycles = cpu.cycles + 7
+    ELSE IF cpu.irq_pending AND NOT get_flag(cpu, FLAG_I) THEN
+        cpu.irq_pending = false
+        handle_interrupt(cpu, VEC_IRQ, false)
+        cpu.cycles = cpu.cycles + 7
     END
 END
 
-# ---- Shifts/Rotates ---------------------------------------
-FUNCTION SH_ASL(C: CPU, v: u8) RETURNS u8:
-    SET_FLAG(C, FLAG_C, (v AND 0x80) != 0)
-    out := (v << 1) AND 0xFF
-    SET_ZN(C, out)
-    RETURN out
-END
+# ============================================================================
+# DMA OPERATIONS
+# ============================================================================
 
-FUNCTION SH_LSR(C: CPU, v: u8) RETURNS u8:
-    SET_FLAG(C, FLAG_C, (v AND 0x01) != 0)
-    out := (v >> 1) AND 0xFF
-    SET_ZN(C, out)
-    RETURN out
-END
-
-FUNCTION SH_ROL(C: CPU, v: u8) RETURNS u8:
-    oldC := GET_FLAG(C, FLAG_C) ? 1 : 0
-    SET_FLAG(C, FLAG_C, (v AND 0x80) != 0)
-    out := ((v << 1) OR oldC) AND 0xFF
-    SET_ZN(C, out)
-    RETURN out
-END
-
-FUNCTION SH_ROR(C: CPU, v: u8) RETURNS u8:
-    oldC := GET_FLAG(C, FLAG_C) ? 1 : 0
-    SET_FLAG(C, FLAG_C, (v AND 0x01) != 0)
-  out := ((v >> 1) OR (oldC << 7)) AND 0xFF
-    SET_ZN(C, out)
-    RETURN out
-END
-
-# ---- BIT test ---------------------------------------------
-FUNCTION OP_BIT(C: CPU, val: u8):
-    # Z = (A & val)==0; N = val bit7; V = val bit6
-    SET_FLAG(C, FLAG_Z, ((C.A AND val) AND 0xFF) == 0)
-    SET_FLAG(C, FLAG_N, (val AND 0x80) != 0)
-    SET_FLAG(C, FLAG_V, (val AND 0x40) != 0)
-END
-
-# ---- INC/DEC memory ---------------------------------------
-FUNCTION OP_INC(C: CPU, addr: u16):
-    new := (READ8(addr) + 1) AND 0xFF
-    WRITE8(addr, new)
-    SET_ZN(C, new)
-END
-
-FUNCTION OP_DEC(C: CPU, addr: u16):
-    new := (READ8(addr) - 1) AND 0xFF
-    WRITE8(addr, new)
-    SET_ZN(C, new)
-END
-
-# ---- Register transfers & inc/dec -------------------------
-FUNCTION OP_TAX(C: CPU): C.X := C.A ; SET_ZN(C, C.X) END
-FUNCTION OP_TXA(C: CPU): C.A := C.X ; SET_ZN(C, C.A) END
-FUNCTION OP_TAY(C: CPU): C.Y := C.A ; SET_ZN(C, C.Y) END
-FUNCTION OP_TYA(C: CPU): C.A := C.Y ; SET_ZN(C, C.A) END
-FUNCTION OP_TSX(C: CPU): C.X := C.SP ; SET_ZN(C, C.X) END
-FUNCTION OP_TXS(C: CPU): C.SP := C.X END
-FUNCTION OP_INX(C: CPU): C.X := (C.X + 1) AND 0xFF ; SET_ZN(C, C.X) END
-FUNCTION OP_INY(C: CPU): C.Y := (C.Y + 1) AND 0xFF ; SET_ZN(C, C.Y) END
-FUNCTION OP_DEX(C: CPU): C.X := (C.X - 1) AND 0xFF ; SET_ZN(C, C.X) END
-FUNCTION OP_DEY(C: CPU): C.Y := (C.Y - 1) AND 0xFF ; SET_ZN(C, C.Y) END
-
-# ---- Compare ------------------------------------------------
-FUNCTION OP_CMP(C: CPU, val: u8): DO_CMP(C, C.A, val) END
-FUNCTION OP_CPX(C: CPU, val: u8): DO_CMP(C, C.X, val) END
-FUNCTION OP_CPY(C: CPU, val: u8): DO_CMP(C, C.Y, val) END
-
-# ---- Flags --------------------------------------------------
-FUNCTION OP_CLC(C: CPU): SET_FLAG(C, FLAG_C, false) END
-FUNCTION OP_SEC(C: CPU): SET_FLAG(C, FLAG_C, true ) END
-FUNCTION OP_CLD(C: CPU): SET_FLAG(C, FLAG_D, false) END
-FUNCTION OP_SED(C: CPU): SET_FLAG(C, FLAG_D, true ) END
-FUNCTION OP_CLI(C: CPU): SET_FLAG(C, FLAG_I, false) END
-FUNCTION OP_SEI(C: CPU): SET_FLAG(C, FLAG_I, true ) END
-FUNCTION OP_CLV(C: CPU): SET_FLAG(C, FLAG_V, false) END
-FUNCTION OP_NOP(C: CPU): NOOP END
-
-# ---- Stack & system ----------------------------------------
-FUNCTION OP_PHA(C: CPU): PUSH8(C, C.A) END
-FUNCTION OP_PLA(C: CPU): C.A := POP8(C) ; SET_ZN(C, C.A) END
-FUNCTION OP_PHP(C: CPU):
-    # On PHP/BRK, bit 5 is set, B is set.
-    val := (C.P OR FLAG_B OR FLAG_X) AND 0xFF
-    PUSH8(C, val)
-END
-FUNCTION OP_PLP(C: CPU):
-    val := POP8(C)
-    # B is ignored when pulling; bit 5 typically set in emulators for consistency
-    C.P := (val OR FLAG_X) AND (NOT FLAG_B)
-END
-
-FUNCTION OP_JSR(C: CPU, target: u16):
-    # 6502 pushes (PC-1) high then low
-    ret := (C.PC - 1) AND 0xFFFF
-    PUSH8(C, (ret >> 8) AND 0xFF)
-    PUSH8(C, ret AND 0xFF)
-    C.PC := target
-END
-
-FUNCTION OP_RTS(C: CPU):
-    lo := POP8(C) ; hi := POP8(C)
-    C.PC := (((hi << 8) OR lo) + 1) AND 0xFFFF
-END
-
-FUNCTION OP_RTI(C: CPU):
-    # Pull P (with B ignored) and PC (lo then hi)
-    p := POP8(C)
-    C.P := (p OR FLAG_X) AND (NOT FLAG_B)
-    lo := POP8(C) ; hi := POP8(C)
-    C.PC := ((hi << 8) OR lo)
-END
-
-FUNCTION OP_BRK(C: CPU):
-    # BRK behaves like a forced IRQ with B=1; pushes PC+1
-    C.PC := (C.PC + 1) AND 0xFFFF
-    PUSH8(C, (C.PC >> 8) AND 0xFF)
-    PUSH8(C,  C.PC       AND 0xFF)
-    PUSH8(C, (C.P OR FLAG_B OR FLAG_X))
-    SET_FLAG(C, FLAG_I, true)
-    C.PC := READ16(VEC_IRQ)
-END
-
-FUNCTION OP_JMP(C: CPU, target: u16):
-    C.PC := target
-END
-
-# ---- Branch helper -----------------------------------------
-# Returns extra cycles (0,1,2) based on taken and page crossing rules.
-FUNCTION DO_BRANCH(C: CPU, cond: bool, target: u16) RETURNS u8:
-    IF NOT cond: RETURN 0
-    base_page := PAGE(C.PC)
-    C.PC := target
-    IF PAGE(target) != base_page: RETURN 2   # +1 for taken, +1 for page cross
-    ELSE: RETURN 1
+FUNCTION perform_oam_dma(cpu: PTR[CPU], page: u8)
+    VAR base_addr: u16 = CAST(u16, page) << 8
+    VAR i: u16 = 0
+    
+    # DMA takes 513 or 514 cycles (513 + 1 if on odd cycle)
+    cpu.stall_cycles = OAM_DMA_CYCLES
+    IF (cpu.cycles AND 1) != 0 THEN
+        cpu.stall_cycles = cpu.stall_cycles + 1
+    END
+    
+    # Copy 256 bytes to OAM
+    WHILE i < 256 DO
+        VAR value: u8 = read_byte(cpu, base_addr + i)
+        write_byte(cpu, 0x2004, value)  # OAMDATA
+        i = i + 1
     END
 END
 
+# ============================================================================
+# INSTRUCTION EXECUTION
+# ============================================================================
 
-
-##############################################################
-# SECTION 7 — OPCODE TABLE (mnemonic + addressing mode)
-##############################################################
-# We maintain a 256-entry DISPATCH[].
-# Each entry has: mnemonic (string or enum), mode (string), handler category.
-#
-# For brevity and fidelity, we directly encode the official set
-# (151 valid opcodes) gleaned from your TSV. Undefined opcodes trap.
-
-STRUCT OpInfo:
-    mnemonic : string
-    mode     : string
-
-ARRAY DISPATCH[0..255] : OpInfo
-
-# Helper to register:
-PROCEDURE DEF(ophex: u8, mnem: string, mode: string):
-    DISPATCH[ophex] := OpInfo(mnem, mode)
-END
-
-# Initialize with the standard table (from 6502-instrs.tsv).
-# (Lines in ascending opcode order; undefined slots left as empty/illegal.)
-PROCEDURE INIT_DISPATCH_TABLE():
-    DEF(0x00,"BRK","impl")
-    DEF(0x01,"ORA","X,ind")
-    DEF(0x05,"ORA","zpg")
-    DEF(0x06,"ASL","zpg")
-    DEF(0x08,"PHP","impl")
-    DEF(0x09,"ORA","#")
-    DEF(0x0A,"ASL","A")
-    DEF(0x0D,"ORA","abs")
-    DEF(0x0E,"ASL","abs")
-
-    DEF(0x10,"BPL","rel")
-    DEF(0x11,"ORA","ind,Y")
-    DEF(0x15,"ORA","zpg,X")
-    DEF(0x16,"ASL","zpg,X")
-    DEF(0x18,"CLC","impl")
-    DEF(0x19,"ORA","abs,Y")
-    DEF(0x1D,"ORA","abs,X")
-    DEF(0x1E,"ASL","abs,X")
-
-    DEF(0x20,"JSR","abs")
-    DEF(0x21,"AND","X,ind")
-    DEF(0x24,"BIT","zpg")
-    DEF(0x25,"AND","zpg")
-    DEF(0x26,"ROL","zpg")
-    DEF(0x28,"PLP","impl")
-    DEF(0x29,"AND","#")
-    DEF(0x2A,"ROL","A")
-    DEF(0x2C,"BIT","abs")
-    DEF(0x2D,"AND","abs")
-    DEF(0x2E,"ROL","abs")
-
-    DEF(0x30,"BMI","rel")
-    DEF(0x31,"AND","ind,Y")
-    DEF(0x35,"AND","zpg,X")
-    DEF(0x36,"ROL","zpg,X")
-    DEF(0x38,"SEC","impl")
-    DEF(0x39,"AND","abs,Y")
-    DEF(0x3D,"AND","abs,X")
-    DEF(0x3E,"ROL","abs,X")
-
-    DEF(0x40,"RTI","impl")
-    DEF(0x41,"EOR","X,ind")
-    DEF(0x45,"EOR","zpg")
-    DEF(0x46,"LSR","zpg")
-    DEF(0x48,"PHA","impl")
-    DEF(0x49,"EOR","#")
-    DEF(0x4A,"LSR","A")
-    DEF(0x4C,"JMP","abs")
-    DEF(0x4D,"EOR","abs")
-    DEF(0x4E,"LSR","abs")
-
-    DEF(0x50,"BVC","rel")
-    DEF(0x51,"EOR","ind,Y")
-    DEF(0x55,"EOR","zpg,X")
-    DEF(0x56,"LSR","zpg,X")
-    DEF(0x58,"CLI","impl")
-    DEF(0x59,"EOR","abs,Y")
-    DEF(0x5D,"EOR","abs,X")
-    DEF(0x5E,"LSR","abs,X")
-
-    DEF(0x60,"RTS","impl")
-    DEF(0x61,"ADC","X,ind")
-    DEF(0x65,"ADC","zpg")
-    DEF(0x66,"ROR","zpg")
-    DEF(0x68,"PLA","impl")
-    DEF(0x69,"ADC","#")
-    DEF(0x6A,"ROR","A")
-    DEF(0x6C,"JMP","ind")
-    DEF(0x6D,"ADC","abs")
-    DEF(0x6E,"ROR","abs")
-
-    DEF(0x70,"BVS","rel")
-    DEF(0x71,"ADC","ind,Y")
-    DEF(0x75,"ADC","zpg,X")
-    DEF(0x76,"ROR","zpg,X")
-    DEF(0x78,"SEI","impl")
-    DEF(0x79,"ADC","abs,Y")
-    DEF(0x7D,"ADC","abs,X")
-    DEF(0x7E,"ROR","abs,X")
-
-    DEF(0x81,"STA","X,ind")
-    DEF(0x84,"STY","zpg")
-    DEF(0x85,"STA","zpg")
-    DEF(0x86,"STX","zpg")
-    DEF(0x88,"DEY","impl")
-    DEF(0x8A,"TXA","impl")
-    DEF(0x8C,"STY","abs")
-    DEF(0x8D,"STA","abs")
-    DEF(0x8E,"STX","abs")
-
-    DEF(0x90,"BCC","rel")
-    DEF(0x91,"STA","ind,Y")
-    DEF(0x94,"STY","zpg,X")
-    DEF(0x95,"STA","zpg,X")
-    DEF(0x96,"STX","zpg,Y")
-    DEF(0x98,"TYA","impl")
-    DEF(0x99,"STA","abs,Y")
-    DEF(0x9A,"TXS","impl")
-    DEF(0x9D,"STA","abs,X")
-
-    DEF(0xA0,"LDY","#")
-    DEF(0xA1,"LDA","X,ind")
-    DEF(0xA2,"LDX","#")
-    DEF(0xA4,"LDY","zpg")
-    DEF(0xA5,"LDA","zpg")
-    DEF(0xA6,"LDX","zpg")
-    DEF(0xA8,"TAY","impl")
-    DEF(0xA9,"LDA","#")
-    DEF(0xAA,"TAX","impl")
-    DEF(0xAC,"LDY","abs")
-    DEF(0xAD,"LDA","abs")
-    DEF(0xAE,"LDX","abs")
-
-    DEF(0xB0,"BCS","rel")
-    DEF(0xB1,"LDA","ind,Y")
-    DEF(0xB4,"LDY","zpg,X")
-    DEF(0xB5,"LDA","zpg,X")
-    DEF(0xB6,"LDX","zpg,Y")
-    DEF(0xB8,"CLV","impl")
-    DEF(0xB9,"LDA","abs,Y")
-    DEF(0xBA,"TSX","impl")
-    DEF(0xBC,"LDY","abs,X")
-    DEF(0xBD,"LDA","abs,X")
-    DEF(0xBE,"LDX","abs,Y")
-
-    DEF(0xC0,"CPY","#")
-    DEF(0xC1,"CMP","X,ind")
-    DEF(0xC4,"CPY","zpg")
-    DEF(0xC5,"CMP","zpg")
-    DEF(0xC6,"DEC","zpg")
-    DEF(0xC8,"INY","impl")
-    DEF(0xC9,"CMP","#")
-    DEF(0xCA,"DEX","impl")
-    DEF(0xCC,"CPY","abs")
-    DEF(0xCD,"CMP","abs")
-    DEF(0xCE,"DEC","abs")
-
-    DEF(0xD0,"BNE","rel")
-    DEF(0xD1,"CMP","ind,Y")
-    DEF(0xD5,"CMP","zpg,X")
-    DEF(0xD6,"DEC","zpg,X")
-    DEF(0xD8,"CLD","impl")
-    DEF(0xD9,"CMP","abs,Y")
-    DEF(0xDD,"CMP","abs,X")
-    DEF(0xDE,"DEC","abs,X")
-
-    DEF(0xE0,"CPX","#")
-    DEF(0xE1,"SBC","X,ind")
-    DEF(0xE4,"CPX","zpg")
-    DEF(0xE5,"SBC","zpg")
-    DEF(0xE6,"INC","zpg")
-    DEF(0xE8,"INX","impl")
-    DEF(0xE9,"SBC","#")
-    DEF(0xEA,"NOP","impl")
-    DEF(0xEC,"CPX","abs")
-    DEF(0xED,"SBC","abs")
-    DEF(0xEE,"INC","abs")
-
-    DEF(0xF0,"BEQ","rel")
-    DEF(0xF1,"SBC","ind,Y")
-    DEF(0xF5,"SBC","zpg,X")
-    DEF(0xF6,"INC","zpg,X")
-    DEF(0xF8,"SED","impl")
-    DEF(0xF9,"SBC","abs,Y")
-    DEF(0xFD,"SBC","abs,X")
-    DEF(0xFE,"INC","abs,X")
-END
-
-
-
-#########################################################
-# SECTION 8 — FETCH/DECODE/EXECUTE: MAIN INTERPRETER
-#########################################################
-# Addressing mode dispatcher to resolver:
-FUNCTION RESOLVE(mode: string, C: CPU) RETURNS (kind, addr, val, crossed):
-    SWITCH mode:
-        CASE "impl":  RETURN AM_IMPL(C)
-        CASE "A":     RETURN AM_ACC(C)
-        CASE "#":     RETURN AM_IMM(C)
-        CASE "zpg":   RETURN AM_ZP(C)
-        CASE "zpg,X": RETURN AM_ZPX(C)
-        CASE "zpg,Y": RETURN AM_ZPY(C)
-        CASE "abs":   RETURN AM_ABS(C)
-        CASE "abs,X": RETURN AM_ABX(C)
-        CASE "abs,Y": RETURN AM_ABY(C)
-        CASE "ind":   RETURN AM_IND(C)
-        CASE "X,ind": RETURN AM_XIND(C)
-        CASE "ind,Y": RETURN AM_INDY(C)
-        CASE "rel":   RETURN AM_REL(C)
-        DEFAULT: ABORT("unknown mode")
-    END
-END
-
-# Execute a single decoded instruction; returns cycles consumed.
-FUNCTION EXECUTE_ONE(C: CPU, mnem: string, mode: string) RETURNS u8:
-    # Service pending interrupts before executing the next instruction
-    IF C.pending_NMI:
-        C.pending_NMI := false
-        # NMI push PCH,PCL,P |B=0|, set I=1, jump to $FFFA
-        PUSH8(C, (C.PC >> 8) AND 0xFF)
-        PUSH8(C,  C.PC       AND 0xFF)
-        PUSH8(C, (C.P AND (NOT FLAG_B)) OR FLAG_X)
-        SET_FLAG(C, FLAG_I, true)
-        C.PC := READ16(VEC_NMI)
-        RETURN 7    # NMI timing commonly 7 cycles (like BRK/IRQ path)
-    END
-    IF C.pending_IRQ AND (NOT GET_FLAG(C, FLAG_I)):
-        C.pending_IRQ := false
-        PUSH8(C, (C.PC >> 8) AND 0xFF)
-        PUSH8(C,  C.PC       AND 0xFF)
-        PUSH8(C, (C.P AND (NOT FLAG_B)) OR FLAG_X)
-        SET_FLAG(C, FLAG_I, true)
-        C.PC := READ16(VEC_IRQ)
-        RETURN 7
-    END
-
-    # Decode addressing/operands
-    (kind, addr, val, crossed) := RESOLVE(mode, C)
-
-    (base_cycles, adds_on_cross) := CYCLES_BASE(mnem, mode)
-    extra := 0
-
-    # Now execute per mnemonic:
-    SWITCH mnem:
-
-        # Branches
-        CASE "BPL": extra := DO_BRANCH(C, GET_FLAG(C, FLAG_N)==false, addr) ; RETURN base_cycles + extra
-        CASE "BMI": extra := DO_BRANCH(C, GET_FLAG(C, FLAG_N)==true , addr) ; RETURN base_cycles + extra
-        CASE "BVC": extra := DO_BRANCH(C, GET_FLAG(C, FLAG_V)==false, addr) ; RETURN base_cycles + extra
-        CASE "BVS": extra := DO_BRANCH(C, GET_FLAG(C, FLAG_V)==true , addr) ; RETURN base_cycles + extra
-        CASE "BCC": extra := DO_BRANCH(C, GET_FLAG(C, FLAG_C)==false, addr) ; RETURN base_cycles + extra
-        CASE "BCS": extra := DO_BRANCH(C, GET_FLAG(C, FLAG_C)==true , addr) ; RETURN base_cycles + extra
-        CASE "BNE": extra := DO_BRANCH(C, GET_FLAG(C, FLAG_Z)==false, addr) ; RETURN base_cycles + extra
-        CASE "BEQ": extra := DO_BRANCH(C, GET_FLAG(C, FLAG_Z)==true , addr) ; RETURN base_cycles + extra
-
-        # Jumps/JSR/RTS/RTI
-        CASE "JMP": OP_JMP(C, addr) ; RETURN base_cycles
-        CASE "JSR": OP_JSR(C, addr) ; RETURN base_cycles
-        CASE "RTS": OP_RTS(C)       ; RETURN base_cycles
-        CASE "RTI": OP_RTI(C)       ; RETURN base_cycles
-
-        # BRK
-        CASE "BRK": OP_BRK(C)       ; RETURN base_cycles
-
-        # Loads (addressing may be immediate or memory)
-        CASE "LDA":
-            IF kind == "#": OP_LDA(C, val) ELSE: OP_LDA(C, READ8(addr)) END
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-        CASE "LDX":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_LDX(C, v)
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-        CASE "LDY":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_LDY(C, v)
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-
-        # Stores
-        CASE "STA": OP_STA(C, addr) ; RETURN base_cycles
-        CASE "STX": OP_STX(C, addr) ; RETURN base_cycles
-        CASE "STY": OP_STY(C, addr) ; RETURN base_cycles
-
-        # Logical/Arithmetic
-        CASE "AND":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_AND(C, v)
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-        CASE "ORA":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_ORA(C, v)
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-        CASE "EOR":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_EOR(C, v)
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-        CASE "ADC":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_ADC(C, v)
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-        CASE "SBC":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_SBC(C, v)
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-
-        # Shifts/Rotates (A vs memory)
-        CASE "ASL":
-            IF kind == "A": C.A := SH_ASL(C, C.A)
-            ELSE: RMW(C, addr, (x)->SH_ASL(C,x))
-            END
-            RETURN base_cycles
-        CASE "LSR":
-            IF kind == "A": C.A := SH_LSR(C, C.A)
-            ELSE: RMW(C, addr, (x)->SH_LSR(C,x))
-            END
-            RETURN base_cycles
-        CASE "ROL":
-            IF kind == "A": C.A := SH_ROL(C, C.A)
-            ELSE: RMW(C, addr, (x)->SH_ROL(C,x))
-            END
-            RETURN base_cycles
-        CASE "ROR":
-            IF kind == "A": C.A := SH_ROR(C, C.A)
-            ELSE: RMW(C, addr, (x)->SH_ROR(C,x))
-            END
-            RETURN base_cycles
-
-        # BIT
-        CASE "BIT": OP_BIT(C, READ8(addr)) ; RETURN base_cycles
-
-        # INC/DEC memory
-        CASE "INC": OP_INC(C, addr) ; RETURN base_cycles
-        CASE "DEC": OP_DEC(C, addr) ; RETURN base_cycles
-
-        # Register ops & flags
-        CASE "TAX": OP_TAX(C) ; RETURN base_cycles
-        CASE "TXA": OP_TXA(C) ; RETURN base_cycles
-        CASE "TAY": OP_TAY(C) ; RETURN base_cycles
-        CASE "TYA": OP_TYA(C) ; RETURN base_cycles
-        CASE "TSX": OP_TSX(C) ; RETURN base_cycles
-        CASE "TXS": OP_TXS(C) ; RETURN base_cycles
-        CASE "DEX": OP_DEX(C) ; RETURN base_cycles
-        CASE "DEY": OP_DEY(C) ; RETURN base_cycles
-        CASE "INX": OP_INX(C) ; RETURN base_cycles
-        CASE "INY": OP_INY(C) ; RETURN base_cycles
-
-        CASE "CMP":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_CMP(C, v)
-            RETURN base_cycles + (adds_on_cross AND crossed ? 1 : 0)
-        CASE "CPX":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_CPX(C, v)
-            RETURN base_cycles
-        CASE "CPY":
-            v := (kind == "#") ? val : READ8(addr)
-            OP_CPY(C, v)
-            RETURN base_cycles
-
-        CASE "CLC": OP_CLC(C) ; RETURN base_cycles
-        CASE "SEC": OP_SEC(C) ; RETURN base_cycles
-        CASE "CLI": OP_CLI(C) ; RETURN base_cycles
-        CASE "SEI": OP_SEI(C) ; RETURN base_cycles
-        CASE "CLV": OP_CLV(C) ; RETURN base_cycles
-        CASE "CLD": OP_CLD(C) ; RETURN base_cycles
-        CASE "SED": OP_SED(C) ; RETURN base_cycles
-        CASE "NOP": OP_NOP(C) ; RETURN base_cycles
-
+FUNCTION execute_instruction(cpu: PTR[CPU]) -> u8
+    VAR opcode: u8 = read_byte(cpu, cpu.PC)
+    cpu.PC = cpu.PC + 1
+    
+    VAR base_cycles: u8 = 2  # Most instructions take at least 2 cycles
+    VAR extra_cycles: u8 = 0
+    
+    SWITCH opcode
+        # ADC - Add with Carry
+        CASE 0x69:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            adc(cpu, addr.value)
+            base_cycles = 2
+        
+        CASE 0x65:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            adc(cpu, addr.value)
+            base_cycles = 3
+        
+        CASE 0x75:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            adc(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0x6D:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            adc(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0x7D:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            adc(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0x79:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            adc(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0x61:  # (Indirect,X)
+            VAR addr: AddressingResult = address_indexed_indirect(cpu)
+            adc(cpu, addr.value)
+            base_cycles = 6
+        
+        CASE 0x71:  # (Indirect),Y
+            VAR addr: AddressingResult = address_indirect_indexed(cpu)
+            adc(cpu, addr.value)
+            base_cycles = 5
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # AND - Logical AND
+        CASE 0x29:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            and_op(cpu, addr.value)
+            base_cycles = 2
+        
+        CASE 0x25:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            and_op(cpu, addr.value)
+            base_cycles = 3
+        
+        CASE 0x35:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            and_op(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0x2D:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            and_op(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0x3D:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            and_op(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0x39:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            and_op(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0x21:  # (Indirect,X)
+            VAR addr: AddressingResult = address_indexed_indirect(cpu)
+            and_op(cpu, addr.value)
+            base_cycles = 6
+        
+        CASE 0x31:  # (Indirect),Y
+            VAR addr: AddressingResult = address_indirect_indexed(cpu)
+            and_op(cpu, addr.value)
+            base_cycles = 5
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # ASL - Arithmetic Shift Left
+        CASE 0x0A:  # Accumulator
+            cpu.A = asl_op(cpu, cpu.A)
+            base_cycles = 2
+        
+        CASE 0x06:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            VAR result: u8 = asl_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 5
+        
+        CASE 0x16:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            VAR result: u8 = asl_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0x0E:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            VAR result: u8 = asl_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0x1E:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            VAR result: u8 = asl_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 7
+        
+        # BIT - Bit Test
+        CASE 0x24:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            bit_op(cpu, addr.value)
+            base_cycles = 3
+        
+        CASE 0x2C:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            bit_op(cpu, addr.value)
+            base_cycles = 4
+        
+        # Branch Instructions
+        CASE 0x10:  # BPL - Branch if Positive
+            extra_cycles = branch(cpu, NOT get_flag(cpu, FLAG_N))
+            base_cycles = 2
+        
+        CASE 0x30:  # BMI - Branch if Minus
+            extra_cycles = branch(cpu, get_flag(cpu, FLAG_N))
+            base_cycles = 2
+        
+        CASE 0x50:  # BVC - Branch if Overflow Clear
+            extra_cycles = branch(cpu, NOT get_flag(cpu, FLAG_V))
+            base_cycles = 2
+        
+        CASE 0x70:  # BVS - Branch if Overflow Set
+            extra_cycles = branch(cpu, get_flag(cpu, FLAG_V))
+            base_cycles = 2
+        
+        CASE 0x90:  # BCC - Branch if Carry Clear
+            extra_cycles = branch(cpu, NOT get_flag(cpu, FLAG_C))
+            base_cycles = 2
+        
+        CASE 0xB0:  # BCS - Branch if Carry Set
+            extra_cycles = branch(cpu, get_flag(cpu, FLAG_C))
+            base_cycles = 2
+        
+        CASE 0xD0:  # BNE - Branch if Not Equal
+            extra_cycles = branch(cpu, NOT get_flag(cpu, FLAG_Z))
+            base_cycles = 2
+        
+        CASE 0xF0:  # BEQ - Branch if Equal
+            extra_cycles = branch(cpu, get_flag(cpu, FLAG_Z))
+            base_cycles = 2
+        
+        # BRK - Break
+        CASE 0x00:
+            cpu.PC = cpu.PC + 1  # Skip padding byte
+            handle_interrupt(cpu, VEC_IRQ, true)
+            base_cycles = 7
+        
+        # CMP - Compare Accumulator
+        CASE 0xC9:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            compare(cpu, cpu.A, addr.value)
+            base_cycles = 2
+        
+        CASE 0xC5:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            compare(cpu, cpu.A, addr.value)
+            base_cycles = 3
+        
+        CASE 0xD5:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            compare(cpu, cpu.A, addr.value)
+            base_cycles = 4
+        
+        CASE 0xCD:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            compare(cpu, cpu.A, addr.value)
+            base_cycles = 4
+        
+        CASE 0xDD:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            compare(cpu, cpu.A, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0xD9:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            compare(cpu, cpu.A, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0xC1:  # (Indirect,X)
+            VAR addr: AddressingResult = address_indexed_indirect(cpu)
+            compare(cpu, cpu.A, addr.value)
+            base_cycles = 6
+        
+        CASE 0xD1:  # (Indirect),Y
+            VAR addr: AddressingResult = address_indirect_indexed(cpu)
+            compare(cpu, cpu.A, addr.value)
+            base_cycles = 5
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # CPX - Compare X
+        CASE 0xE0:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            compare(cpu, cpu.X, addr.value)
+            base_cycles = 2
+        
+        CASE 0xE4:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            compare(cpu, cpu.X, addr.value)
+            base_cycles = 3
+        
+        CASE 0xEC:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            compare(cpu, cpu.X, addr.value)
+            base_cycles = 4
+        
+        # CPY - Compare Y
+        CASE 0xC0:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            compare(cpu, cpu.Y, addr.value)
+            base_cycles = 2
+        
+        CASE 0xC4:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            compare(cpu, cpu.Y, addr.value)
+            base_cycles = 3
+        
+        CASE 0xCC:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            compare(cpu, cpu.Y, addr.value)
+            base_cycles = 4
+        
+        # DEC - Decrement Memory
+        CASE 0xC6:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            VAR result: u8 = dec_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 5
+        
+        CASE 0xD6:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            VAR result: u8 = dec_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0xCE:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            VAR result: u8 = dec_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0xDE:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            VAR result: u8 = dec_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 7
+        
+        # EOR - Exclusive OR
+        CASE 0x49:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            eor_op(cpu, addr.value)
+            base_cycles = 2
+        
+        CASE 0x45:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            eor_op(cpu, addr.value)
+            base_cycles = 3
+        
+        CASE 0x55:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            eor_op(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0x4D:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            eor_op(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0x5D:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            eor_op(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0x59:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            eor_op(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0x41:  # (Indirect,X)
+            VAR addr: AddressingResult = address_indexed_indirect(cpu)
+            eor_op(cpu, addr.value)
+            base_cycles = 6
+        
+        CASE 0x51:  # (Indirect),Y
+            VAR addr: AddressingResult = address_indirect_indexed(cpu)
+            eor_op(cpu, addr.value)
+            base_cycles = 5
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # Flag Operations
+        CASE 0x18:  # CLC - Clear Carry
+            clear_flag(cpu, FLAG_C)
+            base_cycles = 2
+        
+        CASE 0x38:  # SEC - Set Carry
+            set_flag(cpu, FLAG_C)
+            base_cycles = 2
+        
+        CASE 0x58:  # CLI - Clear Interrupt
+            clear_flag(cpu, FLAG_I)
+            base_cycles = 2
+        
+        CASE 0x78:  # SEI - Set Interrupt
+            set_flag(cpu, FLAG_I)
+            base_cycles = 2
+        
+        CASE 0xB8:  # CLV - Clear Overflow
+            clear_flag(cpu, FLAG_V)
+            base_cycles = 2
+        
+        CASE 0xD8:  # CLD - Clear Decimal
+            clear_flag(cpu, FLAG_D)
+            base_cycles = 2
+        
+        CASE 0xF8:  # SED - Set Decimal
+            set_flag(cpu, FLAG_D)
+            base_cycles = 2
+        
+        # INC - Increment Memory
+        CASE 0xE6:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            VAR result: u8 = inc_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 5
+        
+        CASE 0xF6:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            VAR result: u8 = inc_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0xEE:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            VAR result: u8 = inc_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0xFE:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            VAR result: u8 = inc_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 7
+        
+        # JMP - Jump
+        CASE 0x4C:  # Absolute
+            cpu.PC = read_word(cpu, cpu.PC)
+            base_cycles = 3
+        
+        CASE 0x6C:  # Indirect
+            VAR addr: AddressingResult = address_indirect(cpu)
+            cpu.PC = addr.address
+            base_cycles = 5
+        
+        # JSR - Jump to Subroutine
+        CASE 0x20:
+            VAR target: u16 = read_word(cpu, cpu.PC)
+            cpu.PC = cpu.PC + 1  # Point to last byte of JSR
+            push_word(cpu, cpu.PC)
+            cpu.PC = target
+            base_cycles = 6
+        
+        # LDA - Load Accumulator
+        CASE 0xA9:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            cpu.A = addr.value
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 2
+        
+        CASE 0xA5:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            cpu.A = addr.value
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 3
+        
+        CASE 0xB5:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            cpu.A = addr.value
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 4
+        
+        CASE 0xAD:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            cpu.A = addr.value
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 4
+        
+        CASE 0xBD:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            cpu.A = addr.value
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0xB9:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            cpu.A = addr.value
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0xA1:  # (Indirect,X)
+            VAR addr: AddressingResult = address_indexed_indirect(cpu)
+            cpu.A = addr.value
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 6
+        
+        CASE 0xB1:  # (Indirect),Y
+            VAR addr: AddressingResult = address_indirect_indexed(cpu)
+            cpu.A = addr.value
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 5
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # LDX - Load X
+        CASE 0xA2:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            cpu.X = addr.value
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 2
+        
+        CASE 0xA6:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            cpu.X = addr.value
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 3
+        
+        CASE 0xB6:  # Zero Page,Y
+            VAR addr: AddressingResult = address_zero_page_y(cpu)
+            cpu.X = addr.value
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 4
+        
+        CASE 0xAE:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            cpu.X = addr.value
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 4
+        
+        CASE 0xBE:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            cpu.X = addr.value
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # LDY - Load Y
+        CASE 0xA0:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            cpu.Y = addr.value
+            update_zero_negative(cpu, cpu.Y)
+            base_cycles = 2
+        
+        CASE 0xA4:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            cpu.Y = addr.value
+            update_zero_negative(cpu, cpu.Y)
+            base_cycles = 3
+        
+        CASE 0xB4:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            cpu.Y = addr.value
+            update_zero_negative(cpu, cpu.Y)
+            base_cycles = 4
+        
+        CASE 0xAC:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            cpu.Y = addr.value
+            update_zero_negative(cpu, cpu.Y)
+            base_cycles = 4
+        
+        CASE 0xBC:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            cpu.Y = addr.value
+            update_zero_negative(cpu, cpu.Y)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # LSR - Logical Shift Right
+        CASE 0x4A:  # Accumulator
+            cpu.A = lsr_op(cpu, cpu.A)
+            base_cycles = 2
+        
+        CASE 0x46:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            VAR result: u8 = lsr_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 5
+        
+        CASE 0x56:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            VAR result: u8 = lsr_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0x4E:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            VAR result: u8 = lsr_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0x5E:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            VAR result: u8 = lsr_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 7
+        
+        # NOP - No Operation
+        CASE 0xEA:
+            base_cycles = 2
+        
+        # ORA - Logical OR
+        CASE 0x09:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            ora_op(cpu, addr.value)
+            base_cycles = 2
+        
+        CASE 0x05:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            ora_op(cpu, addr.value)
+            base_cycles = 3
+        
+        CASE 0x15:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            ora_op(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0x0D:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            ora_op(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0x1D:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            ora_op(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0x19:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            ora_op(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0x01:  # (Indirect,X)
+            VAR addr: AddressingResult = address_indexed_indirect(cpu)
+            ora_op(cpu, addr.value)
+            base_cycles = 6
+        
+        CASE 0x11:  # (Indirect),Y
+            VAR addr: AddressingResult = address_indirect_indexed(cpu)
+            ora_op(cpu, addr.value)
+            base_cycles = 5
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # Register Transfer
+        CASE 0xAA:  # TAX
+            cpu.X = cpu.A
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 2
+        
+        CASE 0x8A:  # TXA
+            cpu.A = cpu.X
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 2
+        
+        CASE 0xCA:  # DEX
+            cpu.X = (cpu.X - 1) AND 0xFF
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 2
+        
+        CASE 0xE8:  # INX
+            cpu.X = (cpu.X + 1) AND 0xFF
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 2
+        
+        CASE 0xA8:  # TAY
+            cpu.Y = cpu.A
+            update_zero_negative(cpu, cpu.Y)
+            base_cycles = 2
+        
+        CASE 0x98:  # TYA
+            cpu.A = cpu.Y
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 2
+        
+        CASE 0x88:  # DEY
+            cpu.Y = (cpu.Y - 1) AND 0xFF
+            update_zero_negative(cpu, cpu.Y)
+            base_cycles = 2
+        
+        CASE 0xC8:  # INY
+            cpu.Y = (cpu.Y + 1) AND 0xFF
+            update_zero_negative(cpu, cpu.Y)
+            base_cycles = 2
+        
+        # ROL - Rotate Left
+        CASE 0x2A:  # Accumulator
+            cpu.A = rol_op(cpu, cpu.A)
+            base_cycles = 2
+        
+        CASE 0x26:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            VAR result: u8 = rol_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 5
+        
+        CASE 0x36:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            VAR result: u8 = rol_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0x2E:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            VAR result: u8 = rol_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0x3E:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            VAR result: u8 = rol_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 7
+        
+        # ROR - Rotate Right
+        CASE 0x6A:  # Accumulator
+            cpu.A = ror_op(cpu, cpu.A)
+            base_cycles = 2
+        
+        CASE 0x66:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            VAR result: u8 = ror_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 5
+        
+        CASE 0x76:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            VAR result: u8 = ror_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0x6E:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            VAR result: u8 = ror_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 6
+        
+        CASE 0x7E:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            VAR result: u8 = ror_op(cpu, addr.value)
+            write_byte(cpu, addr.address, result)
+            base_cycles = 7
+        
+        # RTI - Return from Interrupt
+        CASE 0x40:
+            cpu.P = pop_byte(cpu) OR FLAG_U  # Ensure unused bit is set
+            clear_flag(cpu, FLAG_B)  # Clear B flag
+            cpu.PC = pop_word(cpu)
+            base_cycles = 6
+        
+        # RTS - Return from Subroutine
+        CASE 0x60:
+            cpu.PC = pop_word(cpu) + 1
+            base_cycles = 6
+        
+        # SBC - Subtract with Carry
+        CASE 0xE9:  # Immediate
+            VAR addr: AddressingResult = address_immediate(cpu)
+            sbc(cpu, addr.value)
+            base_cycles = 2
+        
+        CASE 0xE5:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            sbc(cpu, addr.value)
+            base_cycles = 3
+        
+        CASE 0xF5:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            sbc(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0xED:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            sbc(cpu, addr.value)
+            base_cycles = 4
+        
+        CASE 0xFD:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            sbc(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0xF9:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            sbc(cpu, addr.value)
+            base_cycles = 4
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        CASE 0xE1:  # (Indirect,X)
+            VAR addr: AddressingResult = address_indexed_indirect(cpu)
+            sbc(cpu, addr.value)
+            base_cycles = 6
+        
+        CASE 0xF1:  # (Indirect),Y
+            VAR addr: AddressingResult = address_indirect_indexed(cpu)
+            sbc(cpu, addr.value)
+            base_cycles = 5
+            IF addr.page_crossed THEN extra_cycles = 1 END
+        
+        # STA - Store Accumulator
+        CASE 0x85:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            write_byte(cpu, addr.address, cpu.A)
+            base_cycles = 3
+        
+        CASE 0x95:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            write_byte(cpu, addr.address, cpu.A)
+            base_cycles = 4
+        
+        CASE 0x8D:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            write_byte(cpu, addr.address, cpu.A)
+            base_cycles = 4
+        
+        CASE 0x9D:  # Absolute,X
+            VAR addr: AddressingResult = address_absolute_x(cpu)
+            write_byte(cpu, addr.address, cpu.A)
+            base_cycles = 5
+        
+        CASE 0x99:  # Absolute,Y
+            VAR addr: AddressingResult = address_absolute_y(cpu)
+            write_byte(cpu, addr.address, cpu.A)
+            base_cycles = 5
+        
+        CASE 0x81:  # (Indirect,X)
+            VAR addr: AddressingResult = address_indexed_indirect(cpu)
+            write_byte(cpu, addr.address, cpu.A)
+            base_cycles = 6
+        
+        CASE 0x91:  # (Indirect),Y
+            VAR addr: AddressingResult = address_indirect_indexed(cpu)
+            write_byte(cpu, addr.address, cpu.A)
+            base_cycles = 6
+        
+        # Stack Operations
+        CASE 0x9A:  # TXS
+            cpu.SP = cpu.X
+            base_cycles = 2
+        
+        CASE 0xBA:  # TSX
+            cpu.X = cpu.SP
+            update_zero_negative(cpu, cpu.X)
+            base_cycles = 2
+        
+        CASE 0x48:  # PHA
+            push_byte(cpu, cpu.A)
+            base_cycles = 3
+        
+        CASE 0x68:  # PLA
+            cpu.A = pop_byte(cpu)
+            update_zero_negative(cpu, cpu.A)
+            base_cycles = 4
+        
+        CASE 0x08:  # PHP
+            push_byte(cpu, cpu.P OR FLAG_U OR FLAG_B)  # Set B and U flags
+            base_cycles = 3
+        
+        CASE 0x28:  # PLP
+            cpu.P = pop_byte(cpu) OR FLAG_U  # Ensure unused bit is set
+            clear_flag(cpu, FLAG_B)  # Clear B flag
+            base_cycles = 4
+        
+        # STX - Store X
+        CASE 0x86:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            write_byte(cpu, addr.address, cpu.X)
+            base_cycles = 3
+        
+        CASE 0x96:  # Zero Page,Y
+            VAR addr: AddressingResult = address_zero_page_y(cpu)
+            write_byte(cpu, addr.address, cpu.X)
+            base_cycles = 4
+        
+        CASE 0x8E:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            write_byte(cpu, addr.address, cpu.X)
+            base_cycles = 4
+        
+        # STY - Store Y
+        CASE 0x84:  # Zero Page
+            VAR addr: AddressingResult = address_zero_page(cpu)
+            write_byte(cpu, addr.address, cpu.Y)
+            base_cycles = 3
+        
+        CASE 0x94:  # Zero Page,X
+            VAR addr: AddressingResult = address_zero_page_x(cpu)
+            write_byte(cpu, addr.address, cpu.Y)
+            base_cycles = 4
+        
+        CASE 0x8C:  # Absolute
+            VAR addr: AddressingResult = address_absolute(cpu)
+            write_byte(cpu, addr.address, cpu.Y)
+            base_cycles = 4
+        
+        # Unofficial/Illegal opcodes (common ones that some games use)
         DEFAULT:
-            ABORT("Illegal/unsupported opcode mnemonic: " + mnem)
+            # For now, treat as NOP
+            base_cycles = 2
+    END
+    
+    RETURN base_cycles + extra_cycles
+END
+
+# ============================================================================
+# CPU CONTROL
+# ============================================================================
+
+FUNCTION cpu_reset(cpu: PTR[CPU])
+    # Read reset vector
+    cpu.PC = read_word(cpu, VEC_RESET)
+    
+    # Reset stack pointer
+    cpu.SP = cpu.SP - 3  # Simulates phantom pushes
+    
+    # Set interrupt disable
+    set_flag(cpu, FLAG_I)
+    
+    # Clear decimal mode (even though it's disabled)
+    clear_flag(cpu, FLAG_D)
+    
+    # Reset takes 7 cycles
+    cpu.cycles = cpu.cycles + 7
+END
+
+FUNCTION cpu_step(cpu: PTR[CPU]) -> u8
+    # Handle DMA stalls
+    IF cpu.stall_cycles > 0 THEN
+        VAR stall: u8 = 1
+        IF cpu.stall_cycles < 256 THEN
+            stall = CAST(u8, cpu.stall_cycles)
+        END
+        cpu.stall_cycles = cpu.stall_cycles - stall
+        cpu.cycles = cpu.cycles + stall
+        RETURN stall
+    END
+    
+    # Check for interrupts
+    check_interrupts(cpu)
+    
+    # Execute instruction
+    VAR cycles: u8 = execute_instruction(cpu)
+    cpu.cycles = cpu.cycles + cycles
+    
+    RETURN cycles
+END
+
+FUNCTION cpu_run(cpu: PTR[CPU])
+    cpu.running = true
+    
+    WHILE cpu.running DO
+        cpu_step(cpu)
     END
 END
 
-# Fetch/decode step: returns cycles for the instruction.
-FUNCTION STEP(C: CPU) RETURNS u8:
-    opcode := READ8(C.PC) ; C.PC := (C.PC + 1) AND 0xFFFF
-    info := DISPATCH[opcode]
-    IF info.mnemonic IS EMPTY:
-        ABORT("Illegal opcode $" + HEX2(opcode) + " at PC $" + HEX4((C.PC-1) AND 0xFFFF))
-    END
-    return EXECUTE_ONE(C, info.mnemonic, info.mode)
+FUNCTION cpu_stop(cpu: PTR[CPU])
+    cpu.running = false
 END
 
+# ============================================================================
+# DEBUG HELPERS
+# ============================================================================
 
-
-###################################################
-# SECTION 9 — RESET/INTERRUPTS & MAIN RUN LOOP
-###################################################
-PROCEDURE CPU_RESET(C: CPU):
-    C.A := 0 ; C.X := 0 ; C.Y := 0
-    C.SP := 0xFD
-    C.P  := (FLAG_I OR FLAG_X)    # I=1, bit5=1, others 0
-    C.PC := READ16(VEC_RESET)
-    C.cycles := 0
-    C.running := true
-    C.pending_IRQ := false
-    C.pending_NMI := false
+FUNCTION cpu_get_status_string(cpu: PTR[CPU]) -> string
+    VAR status: string = ""
+    
+    IF get_flag(cpu, FLAG_N) THEN status = status + "N" ELSE status = status + "-" END
+    IF get_flag(cpu, FLAG_V) THEN status = status + "V" ELSE status = status + "-" END
+    status = status + "-"  # Unused bit
+    IF get_flag(cpu, FLAG_B) THEN status = status + "B" ELSE status = status + "-" END
+    IF get_flag(cpu, FLAG_D) THEN status = status + "D" ELSE status = status + "-" END
+    IF get_flag(cpu, FLAG_I) THEN status = status + "I" ELSE status = status + "-" END
+    IF get_flag(cpu, FLAG_Z) THEN status = status + "Z" ELSE status = status + "-" END
+    IF get_flag(cpu, FLAG_C) THEN status = status + "C" ELSE status = status + "-" END
+    
+    RETURN status
 END
-
-PROCEDURE SIGNAL_NMI(C: CPU): C.pending_NMI := true END
-PROCEDURE SIGNAL_IRQ(C: CPU): C.pending_IRQ := true END
-
-# Run for 'budget' cycles (or forever if budget==0)
-PROCEDURE RUN(C: CPU, budget: u64):
-    WHILE C.running:
-        used := STEP(C)
-        C.cycles := C.cycles + used
-        IF budget != 0 AND C.cycles >= budget: BREAK END
-    END
-END
-
-
-
-###############################################################
-# SECTION 10 — BINARY LOADER (INTERFACE FOR MACHINE CODE)
-###############################################################
-# Two simple loading APIs:
-#   (1) LOAD_BINARY_AT(bytes, start_addr)
-#   (2) LOAD_PRG_AUTOSTART(bytes) for Commodore-style 2-byte load address
-
-PROCEDURE LOAD_BINARY_AT(bytes: ARRAY<u8>, start_addr: u16):
-    FOR i FROM 0 TO (LEN(bytes)-1):
-        WRITE8((start_addr + i) AND 0xFFFF, bytes[i])
-    END
-END
-
-# If 'bytes' begins with a 16-bit little-endian load address ($LL,$HH),
-# place the remaining bytes at that address and set PC to the same (optionally).
-PROCEDURE LOAD_PRG_AUTOSTART(C: CPU, bytes: ARRAY<u8>, set_PC: bool):
-    IF LEN(bytes) < 2: ABORT("PRG too short") END
-    load := (bytes[1] << 8) OR bytes[0]
-    FOR i FROM 2 TO (LEN(bytes)-1):
-        WRITE8((load + (i-2)) AND 0xFFFF, bytes[i])
-    END
-    IF set_PC: C.PC := load END
-END
-
-
-
-###############################################################
-# SECTION 11 — POWER-ON SEQUENCE (EXAMPLE USAGE)
-###############################################################
-# Example (illustrative):
-#
-#   INIT_DISPATCH_TABLE()
-#   CPU_RESET(cpu)
-#   LOAD_BINARY_AT(program_bytes, 0x0600)
-#   WRITE8(0xFFFC, 0x00) ; WRITE8(0xFFFD, 0x06)   # reset vector -> $0600
-#   RUN(cpu, budget=0)    # run forever (or give a cycle budget)
-
-PROCEDURE POWER_ON_AND_RUN(program_bytes: ARRAY<u8>, reset_to: u16, cycles_budget: u64):
-    INIT_DISPATCH_TABLE()
-    CPU_RESET(cpu)
-    LOAD_BINARY_AT(program_bytes, reset_to)
-    WRITE8(VEC_RESET + 0, (reset_to AND 0xFF))
-    WRITE8(VEC_RESET + 1, ((reset_to >> 8) AND 0xFF))
-    RUN(cpu, cycles_budget)
-END
-
-
-
-#################################################################
-# APPENDIX — SANITY NOTES & EDGE-CASE BEHAVIOR CAPTURED ABOVE
-#################################################################
-# • $JMP (ind)$ implements the original NMOS wrap bug: high byte read wraps within page.
-# • Branch timing: base 2 cycles +1 if taken +1 more if destination crosses a page.
-# • Page-cross penalties apply only on the documented opcodes/modes as encoded in CYCLES_BASE().
-# • Decimal (BCD) mode affects only ADC/SBC; V flag mirrors the binary add/sub behavior.
-# • BRK sets B when pushing P; PLP ignores B when pulling (we preserve bit 5 set).
-# • Interrupt entry pushes PC and P (with B=0 on IRQ/NMI), sets I=1, and vectors to $FFFA$ (NMI) or $FFFE$ (IRQ/BRK).
-# • RESET loads PC from $FFFC$, sets I=1, SP=$FD$ (common power-on state).
-# • Stack is on page $1$; helpers PUSH*/POP* address $0x0100|SP$.
-# • All arithmetic & loads set Z/N per official rules; compares set C as (reg >= mem).
-# • Unimplemented/illegal opcodes trap with a clear message; extendable if you want NMOS "undocumented" set later.
 

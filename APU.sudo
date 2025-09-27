@@ -1,506 +1,890 @@
-############################################################
-#  NES APU — LITERATE, IMPERATIVE PSEUDO-CODE EMULATOR     #
-#  Focus: clarity, correctness, portability                #
-############################################################
+# APU.sudo - NES Audio Processing Unit Emulation
+# Implements the RP2A03 (NTSC) / RP2A07 (PAL) audio functionality
 
-########################################
-# SECTION 0 — NUMERIC & BIT CONVENTIONS
-########################################
+IMPORT AudioLib  # Generic audio library interface
 
-# APU runs at 1.79 MHz (NTSC) = CPU_FREQ / 2
-CONST APU_CYCLES_PER_SAMPLE = 2
+# ============================================================================
+# CONSTANTS
+# ============================================================================
 
-# Frame Counter Rates
-CONST FC_MODE_4STEP = 4
-CONST FC_MODE_5STEP = 5
+CONST CPU_FREQ_NTSC: u32 = 1789773  # Hz
+CONST CPU_FREQ_PAL: u32 = 1662607   # Hz
+CONST SAMPLE_RATE: u32 = 44100      # Output sample rate
 
-# Channel Types
-CONST CH_PULSE1 = 0
-CONST CH_PULSE2 = 1
-CONST CH_TRIANGLE = 2
-CONST CH_NOISE = 3
-CONST CH_DMC = 4
+# Channel enable bits for $4015
+CONST DMC_ENABLE: u8 = 0x10
+CONST NOISE_ENABLE: u8 = 0x08
+CONST TRIANGLE_ENABLE: u8 = 0x04
+CONST PULSE2_ENABLE: u8 = 0x02
+CONST PULSE1_ENABLE: u8 = 0x01
 
-# Register Addresses
-CONST REG_PULSE1_CTRL    = 0x4000
-CONST REG_PULSE1_RAMP    = 0x4001
-CONST REG_PULSE1_FT_LO   = 0x4002
-CONST REG_PULSE1_FT_HI   = 0x4003
-CONST REG_PULSE2_CTRL    = 0x4004
-CONST REG_PULSE2_RAMP    = 0x4005
-CONST REG_PULSE2_FT_LO   = 0x4006
-CONST REG_PULSE2_FT_HI   = 0x4007
-CONST REG_TRIANGLE_CTRL  = 0x4008
-CONST REG_TRIANGLE_UNUSED= 0x4009
-CONST REG_TRIANGLE_FT_LO = 0x400A
-CONST REG_TRIANGLE_FT_HI = 0x400B
-CONST REG_NOISE_CTRL     = 0x400C
-CONST REG_NOISE_UNUSED   = 0x400D
-CONST REG_NOISE_FT_LO    = 0x400E
-CONST REG_NOISE_FT_HI    = 0x400F
-CONST REG_DMC_FREQ       = 0x4010
-CONST REG_DMC_RAW        = 0x4011
-CONST REG_DMC_START      = 0x4012
-CONST REG_DMC_LEN        = 0x4013
-CONST REG_STATUS         = 0x4015
-CONST REG_FRAME_COUNTER  = 0x4017
+# Frame counter modes
+CONST MODE_4_STEP: u8 = 0
+CONST MODE_5_STEP: u8 = 1
 
-# Status Flags
-CONST STATUS_DMC_IRQ     = 0x80
-CONST STATUS_FRAME_IRQ   = 0x40
-CONST STATUS_DMC_ACTIVE  = 0x10
-CONST STATUS_NOISE       = 0x08
-CONST STATUS_TRIANGLE    = 0x04
-CONST STATUS_PULSE2      = 0x02
-CONST STATUS_PULSE1      = 0x01
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
 
-# Frame Counter Bits
-CONST FC_IRQ_INHIBIT     = 0x40
-CONST FC_MODE_5STEP_BIT  = 0x80
-
-# Pulse Channel Duty Cycles
-CONST PULSE_DUTY_12_5    = 0
-CONST PULSE_DUTY_25      = 1
-CONST PULSE_DUTY_50      = 2
-CONST PULSE_DUTY_75      = 3
-
-# Noise Mode (7-bit vs 15-bit)
-CONST NOISE_MODE_15BIT   = 0
-CONST NOISE_MODE_7BIT    = 1
-
-# Triangle Linear Counter Control
-CONST TRI_LINEAR_CTRL_FLAG = 0x80
-
-# DMC Flags
-CONST DMC_IRQ_ENABLE     = 0x80
-CONST DMC_LOOP_ENABLE    = 0x40
-
-# Helper Masks
-CONST MASK_BYTE          = 0xFF
-CONST MASK_WORD          = 0xFFFF
-
-######################################
-# SECTION 1 — APU STATE & CHANNELS
-######################################
-
-STRUCT Envelope:
-    start_flag : bool
-    divider    : u8
+STRUCT Envelope
+    start_flag: bool
+    loop_flag: bool
+    constant_volume_flag: bool
+    divider_period: u8
+    divider_counter: u8
     decay_level: u8
-    loop_flag  : bool
+    volume: u8
 END
 
-STRUCT Sweep:
-    enabled    : bool
-    period     : u8
-    divider    : u8
-    negate_flag: bool
-    shift      : u8
-    reload     : bool
+STRUCT Sweep
+    enabled: bool
+    period: u8
+    negate: bool
+    shift: u8
+    divider: u8
+    reload_flag: bool
+    target_period: u16
 END
 
-STRUCT LengthCounter:
-    counter    : u8
-    enabled    : bool
+STRUCT LengthCounter
+    halt: bool
+    value: u8
 END
 
-STRUCT PulseChannel:
-    envelope   : Envelope
-    sweep      : Sweep
-    length     : LengthCounter
-    duty       : u8
-    duty_pos   : u8
-    timer      : u16
-    timer_period: u16
-    output     : u8
+STRUCT LinearCounter
+    control_flag: bool
+    reload_value: u8
+    counter: u8
+    reload_flag: bool
 END
 
-STRUCT TriangleChannel:
-    length     : LengthCounter
-    linear_counter: u8
-    linear_reload_flag: bool
-    timer      : u16
-    timer_period: u16
-    sequence   : u8
-    output     : u8
+STRUCT Timer
+    period: u16
+    counter: u16
 END
 
-STRUCT NoiseChannel:
-    envelope   : Envelope
-    length     : LengthCounter
-    mode       : u8  # 7-bit or 15-bit
-    shift_reg  : u16 # 15-bit shift register
-    timer      : u16
-    timer_period: u16
-    output     : u8
+STRUCT PulseChannel
+    enabled: bool
+    duty_cycle: u8
+    duty_position: u8
+    timer: Timer
+    envelope: Envelope
+    sweep: Sweep
+    length_counter: LengthCounter
+    output: u8
 END
 
-STRUCT DMCChannel:
-    irq_enabled : bool
-    loop_flag   : bool
-    timer       : u16
-    timer_period: u16
-    output      : u8
-    sample_addr : u16
-    sample_len  : u16
-    current_addr: u16
-    current_len : u16
-    shift_reg   : u8
+STRUCT TriangleChannel
+    enabled: bool
+    timer: Timer
+    length_counter: LengthCounter
+    linear_counter: LinearCounter
+    step_counter: u8
+    output: u8
+END
+
+STRUCT NoiseChannel
+    enabled: bool
+    mode: bool  # false = normal, true = periodic
+    timer: Timer
+    envelope: Envelope
+    length_counter: LengthCounter
+    shift_register: u16
+    output: u8
+END
+
+STRUCT DMCChannel
+    enabled: bool
+    irq_enabled: bool
+    loop: bool
+    frequency_index: u8
+    direct_load: u8
+    sample_address: u16
+    sample_length: u16
+    current_address: u16
+    bytes_remaining: u16
+    sample_buffer: u8
+    sample_buffer_empty: bool
+    shift_register: u8
     bits_remaining: u8
-    silence_flag: bool
+    output: u8
+    interrupt_flag: bool
 END
 
-STRUCT APU:
-    pulse1     : PulseChannel
-    pulse2     : PulseChannel
-    triangle   : TriangleChannel
-    noise      : NoiseChannel
-    dmc        : DMCChannel
-
-    status     : u8
-    frame_counter_mode: u8  # 4-step or 5-step
-    frame_irq_flag: bool
-    dmc_irq_flag  : bool
-
-    frame_step : u8
-    cycles     : u64
-    sample_rate: u32
-    sample_counter: u32
+STRUCT FrameCounter
+    mode: u8  # 4-step or 5-step
+    irq_inhibit: bool
+    step: u8
+    divider: u16
+    interrupt_flag: bool
 END
 
-######################################
-# SECTION 2 — INITIALIZATION
-######################################
-
-FUNCTION INIT_APU(apu: APU):
-    apu.pulse1 := { ... }  # Initialize all fields to 0/false
-    apu.pulse2 := { ... }
-    apu.triangle := { ... }
-    apu.noise := { ... }
-    apu.dmc := { ... }
-
-    apu.status := 0
-    apu.frame_counter_mode := FC_MODE_4STEP
-    apu.frame_irq_flag := false
-    apu.dmc_irq_flag := false
-    apu.frame_step := 0
-    apu.cycles := 0
-    apu.sample_rate := 44100
-    apu.sample_counter := 0
-
-    # Initialize noise shift register
-    apu.noise.shift_reg := 1
+STRUCT APU
+    pulse1: PulseChannel
+    pulse2: PulseChannel
+    triangle: TriangleChannel
+    noise: NoiseChannel
+    dmc: DMCChannel
+    frame_counter: FrameCounter
+    
+    cpu_frequency: u32
+    cycles_per_sample: f32
+    cycle_counter: f32
+    
+    # Audio output
+    audio_buffer: ARRAY[f32, 2048]
+    buffer_position: u16
+    audio_device: AudioDevice  # From AudioLib
 END
 
-######################################
-# SECTION 3 — REGISTER ACCESS
-######################################
+# ============================================================================
+# LOOKUP TABLES
+# ============================================================================
 
-FUNCTION WRITE_APU_REGISTER(apu: APU, addr: u16, value: u8):
-    value := value AND MASK_BYTE
-    SWITCH addr:
-        CASE REG_PULSE1_CTRL:
-            apu.pulse1.duty := (value >> 6) AND 3
-            apu.pulse1.envelope.loop_flag := ((value >> 5) AND 1) != 0
-            apu.pulse1.envelope.start_flag := true
-            # ... other envelope bits
-        CASE REG_PULSE1_RAMP:
-            apu.pulse1.sweep.enabled := ((value >> 7) AND 1) != 0
-            apu.pulse1.sweep.period := (value >> 4) AND 7
-            apu.pulse1.sweep.negate_flag := ((value >> 3) AND 1) != 0
-            apu.pulse1.sweep.shift := value AND 7
-            apu.pulse1.sweep.reload := true
-        CASE REG_PULSE1_FT_LO:
-            apu.pulse1.timer_period := (apu.pulse1.timer_period AND 0xFF00) OR value
-        CASE REG_PULSE1_FT_HI:
-            apu.pulse1.timer_period := (apu.pulse1.timer_period AND 0x00FF) OR ((value AND 7) << 8)
-            apu.pulse1.length.counter := LENGTH_TABLE[value >> 3]
-            apu.pulse1.envelope.start_flag := true
-            apu.pulse1.duty_pos := 0
-
-        # Repeat for PULSE2 with apu.pulse2
-
-        CASE REG_TRIANGLE_CTRL:
-            apu.triangle.linear_reload_flag := ((value >> 7) AND 1) != 0
-            # ... other bits
-        CASE REG_TRIANGLE_FT_LO:
-            apu.triangle.timer_period := (apu.triangle.timer_period AND 0xFF00) OR value
-        CASE REG_TRIANGLE_FT_HI:
-            apu.triangle.timer_period := (apu.triangle.timer_period AND 0x00FF) OR ((value AND 7) << 8)
-            apu.triangle.length.counter := LENGTH_TABLE[value >> 3]
-
-        CASE REG_NOISE_CTRL:
-            apu.noise.envelope.loop_flag := ((value >> 5) AND 1) != 0
-            apu.noise.envelope.start_flag := true
-        CASE REG_NOISE_FT_LO:
-            apu.noise.timer_period := value AND 0x0F
-        CASE REG_NOISE_FT_HI:
-            apu.noise.mode := (value >> 7) AND 1
-            apu.noise.timer_period := (value AND 0x0F)
-            apu.noise.length.counter := LENGTH_TABLE[value >> 3]
-            apu.noise.envelope.start_flag := true
-
-        CASE REG_DMC_FREQ:
-            apu.dmc.irq_enabled := ((value >> 7) AND 1) != 0
-            apu.dmc.loop_flag := ((value >> 6) AND 1) != 0
-            apu.dmc.timer_period := DMC_TIMER_TABLE[value AND 0x0F]
-        CASE REG_DMC_RAW:
-            apu.dmc.output := value AND 0x7F
-        CASE REG_DMC_START:
-            apu.dmc.sample_addr := 0xC000 OR (value << 6)
-        CASE REG_DMC_LEN:
-            apu.dmc.sample_len := (value << 4) OR 1
-
-        CASE REG_STATUS:
-            IF (value AND 1) == 0: apu.pulse1.length.counter := 0 END
-            IF (value AND 2) == 0: apu.pulse2.length.counter := 0 END
-            IF (value AND 4) == 0: apu.triangle.length.counter := 0 END
-            IF (value AND 8) == 0: apu.noise.length.counter := 0 END
-            # DMC start/stop handled separately
-            IF (value AND 0x10) != 0 AND apu.dmc.current_len == 0:
-                RESTART_DMC(apu)
-            ELIF (value AND 0x10) == 0:
-                apu.dmc.current_len := 0
-            END
-            apu.dmc_irq_flag := false
-
-        CASE REG_FRAME_COUNTER:
-            apu.frame_counter_mode := IF (value AND FC_MODE_5STEP_BIT) != 0 THEN FC_MODE_5STEP ELSE FC_MODE_4STEP
-            IF (value AND FC_IRQ_INHIBIT) != 0:
-                apu.frame_irq_flag := false
-            END
-            apu.frame_step := 0
-    END
-END
-
-FUNCTION READ_APU_REGISTER(apu: APU, addr: u16) RETURNS u8:
-    SWITCH addr:
-        CASE REG_STATUS:
-            result := 0
-            IF apu.pulse1.length.counter > 0: result := result OR 1 END
-            IF apu.pulse2.length.counter > 0: result := result OR 2 END
-            IF apu.triangle.length.counter > 0: result := result OR 4 END
-            IF apu.noise.length.counter > 0: result := result OR 8 END
-            IF apu.dmc.current_len > 0: result := result OR 0x10 END
-            IF apu.frame_irq_flag: result := result OR STATUS_FRAME_IRQ END
-            IF apu.dmc_irq_flag: result := result OR STATUS_DMC_IRQ END
-            apu.frame_irq_flag := false
-            RETURN result
-        DEFAULT:
-            RETURN 0  # Writes only or undefined
-    END
-END
-
-######################################
-# SECTION 4 — LENGTH COUNTER TABLE
-######################################
-
-ARRAY LENGTH_TABLE[0..31] OF u8 = {
-    10,254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14,
+CONST LENGTH_TABLE: ARRAY[u8, 32] = [
+    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
     12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
-}
+]
 
-ARRAY DMC_TIMER_TABLE[0..15] OF u16 = {
-    428, 380, 340, 320, 286, 254, 226, 214,
-    190, 160, 142, 128, 106,  85,  72,  54
-}
+CONST DUTY_SEQUENCES: ARRAY[ARRAY[u8, 8], 4] = [
+    [0, 1, 0, 0, 0, 0, 0, 0],  # 12.5%
+    [0, 1, 1, 0, 0, 0, 0, 0],  # 25%
+    [0, 1, 1, 1, 1, 0, 0, 0],  # 50%
+    [1, 0, 0, 1, 1, 1, 1, 1]   # 75% (negated 25%)
+]
 
-######################################
-# SECTION 5 — CHANNEL STEPPING
-######################################
+CONST TRIANGLE_SEQUENCE: ARRAY[u8, 32] = [
+    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+]
 
-FUNCTION STEP_PULSE(ch: PulseChannel):
-    IF ch.timer == 0:
-        ch.timer := ch.timer_period
-        ch.duty_pos := (ch.duty_pos + 1) AND 7
-    ELSE:
-        ch.timer := ch.timer - 1
+CONST NOISE_PERIOD_TABLE: ARRAY[u16, 16] = [
+    4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068
+]
+
+CONST DMC_RATE_TABLE_NTSC: ARRAY[u16, 16] = [
+    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54
+]
+
+CONST DMC_RATE_TABLE_PAL: ARRAY[u16, 16] = [
+    398, 354, 316, 298, 276, 236, 210, 198, 176, 148, 132, 118, 98, 78, 66, 50
+]
+
+# ============================================================================
+# APU INITIALIZATION
+# ============================================================================
+
+FUNCTION apu_create(cpu_freq: u32) -> APU
+    VAR apu: APU
+    
+    apu.cpu_frequency = cpu_freq
+    apu.cycles_per_sample = CAST(f32, cpu_freq) / CAST(f32, SAMPLE_RATE)
+    apu.cycle_counter = 0.0
+    
+    # Initialize audio output
+    apu.audio_device = AudioLib.create_device(SAMPLE_RATE, 1, 2048)
+    apu.buffer_position = 0
+    
+    # Initialize channels to default state
+    apu.pulse1.shift_register = 1
+    apu.pulse2.shift_register = 1
+    apu.noise.shift_register = 1
+    
+    # Set frame counter to 4-step mode
+    apu.frame_counter.mode = MODE_4_STEP
+    apu.frame_counter.step = 0
+    
+    RETURN apu
+END
+
+# ============================================================================
+# REGISTER WRITES
+# ============================================================================
+
+FUNCTION apu_write_register(apu: PTR[APU], address: u16, value: u8)
+    IF address >= 0x4000 AND address <= 0x4017 THEN
+        SWITCH address
+            CASE 0x4000:  # Pulse 1 control
+                write_pulse_control(PTR[apu.pulse1], value)
+            
+            CASE 0x4001:  # Pulse 1 sweep
+                write_pulse_sweep(PTR[apu.pulse1], value, 1)
+            
+            CASE 0x4002:  # Pulse 1 timer low
+                apu.pulse1.timer.period = (apu.pulse1.timer.period AND 0xFF00) OR value
+            
+            CASE 0x4003:  # Pulse 1 timer high + length
+                write_pulse_timer_high(PTR[apu.pulse1], value)
+            
+            CASE 0x4004:  # Pulse 2 control
+                write_pulse_control(PTR[apu.pulse2], value)
+            
+            CASE 0x4005:  # Pulse 2 sweep
+                write_pulse_sweep(PTR[apu.pulse2], value, 2)
+            
+            CASE 0x4006:  # Pulse 2 timer low
+                apu.pulse2.timer.period = (apu.pulse2.timer.period AND 0xFF00) OR value
+            
+            CASE 0x4007:  # Pulse 2 timer high + length
+                write_pulse_timer_high(PTR[apu.pulse2], value)
+            
+            CASE 0x4008:  # Triangle control
+                write_triangle_control(PTR[apu.triangle], value)
+            
+            CASE 0x400A:  # Triangle timer low
+                apu.triangle.timer.period = (apu.triangle.timer.period AND 0xFF00) OR value
+            
+            CASE 0x400B:  # Triangle timer high + length
+                write_triangle_timer_high(PTR[apu.triangle], value)
+            
+            CASE 0x400C:  # Noise control
+                write_noise_control(PTR[apu.noise], value)
+            
+            CASE 0x400E:  # Noise period
+                write_noise_period(PTR[apu.noise], value)
+            
+            CASE 0x400F:  # Noise length
+                write_noise_length(PTR[apu.noise], value)
+            
+            CASE 0x4010:  # DMC control
+                write_dmc_control(PTR[apu.dmc], value)
+            
+            CASE 0x4011:  # DMC direct load
+                apu.dmc.direct_load = value AND 0x7F
+                apu.dmc.output = apu.dmc.direct_load
+            
+            CASE 0x4012:  # DMC sample address
+                apu.dmc.sample_address = 0xC000 OR (CAST(u16, value) << 6)
+            
+            CASE 0x4013:  # DMC sample length
+                apu.dmc.sample_length = (CAST(u16, value) << 4) OR 1
+            
+            CASE 0x4015:  # Status/Control
+                write_status(apu, value)
+            
+            CASE 0x4017:  # Frame counter
+                write_frame_counter(PTR[apu.frame_counter], value)
+        END
     END
+END
 
-    IF ch.length.counter == 0 OR ch.timer_period < 8:
-        ch.output := 0
-        RETURN
+# ============================================================================
+# REGISTER READS
+# ============================================================================
+
+FUNCTION apu_read_status(apu: PTR[APU]) -> u8
+    VAR status: u8 = 0
+    
+    # Length counter status bits
+    IF apu.pulse1.length_counter.value > 0 THEN
+        status = status OR PULSE1_ENABLE
     END
+    
+    IF apu.pulse2.length_counter.value > 0 THEN
+        status = status OR PULSE2_ENABLE
+    END
+    
+    IF apu.triangle.length_counter.value > 0 THEN
+        status = status OR TRIANGLE_ENABLE
+    END
+    
+    IF apu.noise.length_counter.value > 0 THEN
+        status = status OR NOISE_ENABLE
+    END
+    
+    # DMC status
+    IF apu.dmc.bytes_remaining > 0 THEN
+        status = status OR DMC_ENABLE
+    END
+    
+    # Interrupt flags
+    IF apu.frame_counter.interrupt_flag THEN
+        status = status OR 0x40
+        apu.frame_counter.interrupt_flag = false  # Clear on read
+    END
+    
+    IF apu.dmc.interrupt_flag THEN
+        status = status OR 0x80
+    END
+    
+    RETURN status
+END
 
-    IF ch.envelope.start_flag:
-        ch.envelope.start_flag := false
-        ch.envelope.divider := 15
-        ch.envelope.decay_level := 15
-    ELSE:
-        IF ch.envelope.divider == 0:
-            ch.envelope.divider := 15
-            IF ch.envelope.decay_level > 0:
-                ch.envelope.decay_level := ch.envelope.decay_level - 1
-            ELIF ch.envelope.loop_flag:
-                ch.envelope.decay_level := 15
+# ============================================================================
+# CHANNEL IMPLEMENTATIONS
+# ============================================================================
+
+# Pulse channel functions
+FUNCTION write_pulse_control(pulse: PTR[PulseChannel], value: u8)
+    pulse.duty_cycle = (value >> 6) AND 0x03
+    pulse.length_counter.halt = (value AND 0x20) != 0
+    pulse.envelope.loop_flag = pulse.length_counter.halt
+    pulse.envelope.constant_volume_flag = (value AND 0x10) != 0
+    pulse.envelope.volume = value AND 0x0F
+    pulse.envelope.divider_period = pulse.envelope.volume
+END
+
+FUNCTION write_pulse_sweep(pulse: PTR[PulseChannel], value: u8, channel_num: u8)
+    pulse.sweep.enabled = (value AND 0x80) != 0
+    pulse.sweep.period = (value >> 4) AND 0x07
+    pulse.sweep.negate = (value AND 0x08) != 0
+    pulse.sweep.shift = value AND 0x07
+    pulse.sweep.reload_flag = true
+END
+
+FUNCTION write_pulse_timer_high(pulse: PTR[PulseChannel], value: u8)
+    pulse.timer.period = (pulse.timer.period AND 0x00FF) OR (CAST(u16, value AND 0x07) << 8)
+    pulse.length_counter.value = LENGTH_TABLE[value >> 3]
+    pulse.duty_position = 0  # Reset phase
+    pulse.envelope.start_flag = true
+END
+
+FUNCTION clock_pulse_timer(pulse: PTR[PulseChannel])
+    IF pulse.timer.counter == 0 THEN
+        pulse.timer.counter = pulse.timer.period
+        pulse.duty_position = (pulse.duty_position + 1) AND 0x07
+    ELSE
+        pulse.timer.counter = pulse.timer.counter - 1
+    END
+END
+
+FUNCTION get_pulse_output(pulse: PTR[PulseChannel]) -> u8
+    # Check if channel should be silenced
+    IF NOT pulse.enabled THEN
+        RETURN 0
+    END
+    
+    IF pulse.length_counter.value == 0 THEN
+        RETURN 0
+    END
+    
+    # Sweep silence check
+    IF pulse.timer.period < 8 OR pulse.sweep.target_period > 0x7FF THEN
+        RETURN 0
+    END
+    
+    # Get duty cycle output
+    VAR duty_output: u8 = DUTY_SEQUENCES[pulse.duty_cycle][pulse.duty_position]
+    
+    IF duty_output == 0 THEN
+        RETURN 0
+    END
+    
+    # Apply volume/envelope
+    IF pulse.envelope.constant_volume_flag THEN
+        RETURN pulse.envelope.volume
+    ELSE
+        RETURN pulse.envelope.decay_level
+    END
+END
+
+# Triangle channel functions
+FUNCTION write_triangle_control(triangle: PTR[TriangleChannel], value: u8)
+    triangle.length_counter.halt = (value AND 0x80) != 0
+    triangle.linear_counter.control_flag = triangle.length_counter.halt
+    triangle.linear_counter.reload_value = value AND 0x7F
+END
+
+FUNCTION write_triangle_timer_high(triangle: PTR[TriangleChannel], value: u8)
+    triangle.timer.period = (triangle.timer.period AND 0x00FF) OR (CAST(u16, value AND 0x07) << 8)
+    triangle.length_counter.value = LENGTH_TABLE[value >> 3]
+    triangle.linear_counter.reload_flag = true
+END
+
+FUNCTION clock_triangle_timer(triangle: PTR[TriangleChannel])
+    IF triangle.timer.counter == 0 THEN
+        triangle.timer.counter = triangle.timer.period
+        
+        # Only advance if both counters are non-zero
+        IF triangle.length_counter.value > 0 AND triangle.linear_counter.counter > 0 THEN
+            triangle.step_counter = (triangle.step_counter + 1) AND 0x1F
+            triangle.output = TRIANGLE_SEQUENCE[triangle.step_counter]
+        END
+    ELSE
+        triangle.timer.counter = triangle.timer.counter - 1
+    END
+END
+
+# Noise channel functions
+FUNCTION write_noise_control(noise: PTR[NoiseChannel], value: u8)
+    noise.length_counter.halt = (value AND 0x20) != 0
+    noise.envelope.loop_flag = noise.length_counter.halt
+    noise.envelope.constant_volume_flag = (value AND 0x10) != 0
+    noise.envelope.volume = value AND 0x0F
+    noise.envelope.divider_period = noise.envelope.volume
+END
+
+FUNCTION write_noise_period(noise: PTR[NoiseChannel], value: u8)
+    noise.mode = (value AND 0x80) != 0
+    noise.timer.period = NOISE_PERIOD_TABLE[value AND 0x0F]
+END
+
+FUNCTION write_noise_length(noise: PTR[NoiseChannel], value: u8)
+    noise.length_counter.value = LENGTH_TABLE[value >> 3]
+    noise.envelope.start_flag = true
+END
+
+FUNCTION clock_noise_timer(noise: PTR[NoiseChannel])
+    IF noise.timer.counter == 0 THEN
+        noise.timer.counter = noise.timer.period
+        
+        # Clock LFSR
+        VAR feedback: u16
+        IF noise.mode THEN
+            # Periodic mode - use bit 6
+            feedback = (noise.shift_register AND 1) XOR ((noise.shift_register >> 6) AND 1)
+        ELSE
+            # Normal mode - use bit 1
+            feedback = (noise.shift_register AND 1) XOR ((noise.shift_register >> 1) AND 1)
+        END
+        
+        noise.shift_register = noise.shift_register >> 1
+        noise.shift_register = noise.shift_register OR (feedback << 14)
+    ELSE
+        noise.timer.counter = noise.timer.counter - 1
+    END
+END
+
+FUNCTION get_noise_output(noise: PTR[NoiseChannel]) -> u8
+    IF NOT noise.enabled THEN
+        RETURN 0
+    END
+    
+    IF noise.length_counter.value == 0 THEN
+        RETURN 0
+    END
+    
+    IF (noise.shift_register AND 1) != 0 THEN
+        RETURN 0
+    END
+    
+    IF noise.envelope.constant_volume_flag THEN
+        RETURN noise.envelope.volume
+    ELSE
+        RETURN noise.envelope.decay_level
+    END
+END
+
+# DMC channel functions
+FUNCTION write_dmc_control(dmc: PTR[DMCChannel], value: u8)
+    dmc.irq_enabled = (value AND 0x80) != 0
+    dmc.loop = (value AND 0x40) != 0
+    dmc.frequency_index = value AND 0x0F
+    
+    IF NOT dmc.irq_enabled THEN
+        dmc.interrupt_flag = false
+    END
+END
+
+FUNCTION clock_dmc_timer(dmc: PTR[DMCChannel], cpu_freq: u32)
+    # Determine rate table based on system
+    VAR rate_table: PTR[ARRAY[u16, 16]]
+    IF cpu_freq == CPU_FREQ_NTSC THEN
+        rate_table = PTR[DMC_RATE_TABLE_NTSC]
+    ELSE
+        rate_table = PTR[DMC_RATE_TABLE_PAL]
+    END
+    
+    IF dmc.timer.counter == 0 THEN
+        dmc.timer.counter = rate_table[dmc.frequency_index]
+        clock_dmc_output(dmc)
+    ELSE
+        dmc.timer.counter = dmc.timer.counter - 1
+    END
+END
+
+FUNCTION clock_dmc_output(dmc: PTR[DMCChannel])
+    # Output cycle
+    IF dmc.bits_remaining > 0 THEN
+        IF (dmc.shift_register AND 1) != 0 THEN
+            # Increment
+            IF dmc.output <= 125 THEN
+                dmc.output = dmc.output + 2
             END
-        ELSE:
-            ch.envelope.divider := ch.envelope.divider - 1
-        END
-    END
-
-    volume := IF ch.envelope.loop_flag THEN ch.envelope.decay_level ELSE ch.envelope.divider END
-
-    IF ch.sweep.enabled AND ch.sweep.shift != 0:
-        IF ch.sweep.divider == 0:
-            IF ch.sweep.negate_flag:
-                ch.timer_period := ch.timer_period - (ch.timer_period >> ch.sweep.shift)
-            ELSE:
-                ch.timer_period := ch.timer_period + (ch.timer_period >> ch.sweep.shift)
-            END
-            ch.sweep.divider := ch.sweep.period
-        ELSE:
-            ch.sweep.divider := ch.sweep.divider - 1
-        END
-        IF ch.sweep.reload:
-            ch.sweep.divider := ch.sweep.period
-            ch.sweep.reload := false
-        END
-    END
-
-    duty_bit := DUTY_TABLE[ch.duty][ch.duty_pos]
-    IF duty_bit == 1:
-        ch.output := volume
-    ELSE:
-        ch.output := 0
-    END
-END
-
-ARRAY DUTY_TABLE[0..3][0..7] OF u8 = {
-    {0,1,0,0,0,0,0,0},  # 12.5%
-    {0,1,1,0,0,0,0,0},  # 25%
-    {0,1,1,1,1,0,0,0},  # 50%
-    {1,0,0,1,1,1,1,1}   # 75%
-}
-
-FUNCTION STEP_TRIANGLE(tri: TriangleChannel):
-    IF tri.timer == 0:
-        tri.timer := tri.timer_period
-        IF tri.length.counter > 0 AND tri.linear_counter > 0:
-            tri.sequence := (tri.sequence + 1) AND 0x1F
-            tri.output := TRIANGLE_SEQUENCE[tri.sequence]
-        END
-    ELSE:
-        tri.timer := tri.timer - 1
-    END
-
-    IF tri.linear_reload_flag:
-        tri.linear_counter := tri.linear_counter_value
-    ELIF tri.linear_counter > 0:
-        tri.linear_counter := tri.linear_counter - 1
-    END
-    IF NOT tri.length.enabled:
-        tri.linear_counter := tri.linear_counter_value
-    END
-END
-
-ARRAY TRIANGLE_SEQUENCE[0..31] OF u8 = {
-    15,14,13,12,11,10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-     0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15
-}
-
-FUNCTION STEP_NOISE(noise: NoiseChannel):
-    IF noise.timer == 0:
-        noise.timer := noise.timer_period
-        feedback := IF noise.mode == NOISE_MODE_7BIT THEN
-            ((noise.shift_reg >> 6) XOR (noise.shift_reg >> 5)) AND 1
-        ELSE:
-            ((noise.shift_reg >> 14) XOR (noise.shift_reg >> 13)) AND 1
-        END
-        noise.shift_reg := (noise.shift_reg >> 1) OR (feedback << 14)
-        IF (noise.shift_reg AND 1) == 0:
-            noise.output := noise.envelope.decay_level
-        ELSE:
-            noise.output := 0
-        END
-    ELSE:
-        noise.timer := noise.timer - 1
-    END
-
-    # Envelope logic similar to pulse
-END
-
-FUNCTION STEP_DMC(dmc: DMCChannel):
-    IF dmc.timer == 0:
-        dmc.timer := dmc.timer_period
-        IF NOT dmc.silence_flag:
-            IF (dmc.shift_reg AND 1) != 0:
-                IF dmc.output <= 125: dmc.output := dmc.output + 2 END
-            ELSE:
-                IF dmc.output >= 2: dmc.output := dmc.output - 2 END
+        ELSE
+            # Decrement
+            IF dmc.output >= 2 THEN
+                dmc.output = dmc.output - 2
             END
         END
-        dmc.shift_reg := dmc.shift_reg >> 1
-        dmc.bits_remaining := dmc.bits_remaining - 1
-        IF dmc.bits_remaining == 0:
-            dmc.bits_remaining := 8
-            # Load next sample byte (simplified)
+        
+        dmc.shift_register = dmc.shift_register >> 1
+        dmc.bits_remaining = dmc.bits_remaining - 1
+    END
+    
+    # Sample fetch
+    IF dmc.bits_remaining == 0 AND NOT dmc.sample_buffer_empty THEN
+        dmc.shift_register = dmc.sample_buffer
+        dmc.bits_remaining = 8
+        dmc.sample_buffer_empty = true
+        
+        # Start memory read if bytes remaining
+        IF dmc.bytes_remaining > 0 THEN
+            # This would trigger actual memory read
+            # For now, we'll simulate it
+            dmc_fetch_sample(dmc)
         END
-    ELSE:
-        dmc.timer := dmc.timer - 1
     END
 END
 
-######################################
-# SECTION 6 — FRAME COUNTER & IRQ
-######################################
-
-FUNCTION STEP_FRAME_COUNTER(apu: APU):
-    mode := apu.frame_counter_mode
-    step := apu.frame_step
-
-    # Clock envelopes & linear counter
-    IF step MOD 2 == 1 OR (mode == FC_MODE_4STEP AND step == 4):
-        # Clock length counters & sweep units
+FUNCTION dmc_fetch_sample(dmc: PTR[DMCChannel])
+    # In real emulation, this would read from memory
+    # Here we simulate the fetch
+    dmc.sample_buffer = 0x55  # Placeholder
+    dmc.sample_buffer_empty = false
+    
+    dmc.current_address = dmc.current_address + 1
+    IF dmc.current_address == 0x0000 THEN  # Wrapped around
+        dmc.current_address = 0x8000
     END
-
-    # Generate IRQ
-    IF mode == FC_MODE_4STEP AND step == 3 AND NOT (apu.status AND FC_IRQ_INHIBIT):
-        apu.frame_irq_flag := true
-    END
-
-    apu.frame_step := (apu.frame_step + 1) MOD (IF mode == FC_MODE_4STEP THEN 4 ELSE 5)
-END
-
-######################################
-# SECTION 7 — MAIN STEP FUNCTION
-######################################
-
-FUNCTION STEP_APU(apu: APU):
-    apu.cycles := apu.cycles + 1
-
-    # Step each channel
-    STEP_PULSE(apu.pulse1)
-    STEP_PULSE(apu.pulse2)
-    STEP_TRIANGLE(apu.triangle)
-    STEP_NOISE(apu.noise)
-    STEP_DMC(apu.dmc)
-
-    # Frame counter (every APU_CYCLES_PER_SAMPLE * 2)
-    IF (apu.cycles MOD (APU_CYCLES_PER_SAMPLE * 2)) == 0:
-        STEP_FRAME_COUNTER(apu)
-    END
-
-    # Sample output (every APU_CYCLES_PER_SAMPLE)
-    IF (apu.cycles MOD APU_CYCLES_PER_SAMPLE) == 0:
-        output_sample(apu)
+    
+    dmc.bytes_remaining = dmc.bytes_remaining - 1
+    
+    IF dmc.bytes_remaining == 0 THEN
+        IF dmc.loop THEN
+            dmc.current_address = dmc.sample_address
+            dmc.bytes_remaining = dmc.sample_length
+        ELSE IF dmc.irq_enabled THEN
+            dmc.interrupt_flag = true
+        END
     END
 END
 
-FUNCTION output_sample(apu: APU):
-    # Mix all channel outputs
-    pulse_out := 0
-    IF apu.pulse1.output > 0 OR apu.pulse2.output > 0:
-        pulse_out := 95.88 / ((8128 / (apu.pulse1.output + apu.pulse2.output)) + 100)
-    END
+# ============================================================================
+# FRAME COUNTER
+# ============================================================================
 
-    tnd_out := 0
-    tmp := (apu.triangle.output / 8227) + (apu.noise.output / 12241) + (apu.dmc.output / 22638)
-    IF tmp > 0:
-        tnd_out := 159.79 / (1 / tmp + 100)
+FUNCTION write_frame_counter(fc: PTR[FrameCounter], value: u8)
+    fc.mode = (value >> 7) AND 1
+    fc.irq_inhibit = (value AND 0x40) != 0
+    
+    IF fc.irq_inhibit THEN
+        fc.interrupt_flag = false
     END
+    
+    # Reset frame counter
+    fc.divider = 0
+    fc.step = 0
+    
+    # If 5-step mode, immediately clock
+    IF fc.mode == MODE_5_STEP THEN
+        clock_envelopes()
+        clock_length_counters()
+        clock_sweeps()
+    END
+END
 
-    mixed := pulse_out + tnd_out
-    # Send to audio output buffer
+FUNCTION clock_frame_counter(apu: PTR[APU])
+    VAR fc: PTR[FrameCounter] = PTR[apu.frame_counter]
+    
+    # Frame counter runs at 240Hz (CPU / 7457)
+    fc.divider = fc.divider + 1
+    
+    VAR clock_divider: u16
+    IF apu.cpu_frequency == CPU_FREQ_NTSC THEN
+        clock_divider = 7457
+    ELSE
+        clock_divider = 7458
+    END
+    
+    IF fc.divider >= clock_divider THEN
+        fc.divider = 0
+        
+        IF fc.mode == MODE_4_STEP THEN
+            clock_frame_4_step(apu)
+        ELSE
+            clock_frame_5_step(apu)
+        END
+    END
+END
+
+FUNCTION clock_frame_4_step(apu: PTR[APU])
+    VAR fc: PTR[FrameCounter] = PTR[apu.frame_counter]
+    
+    SWITCH fc.step
+        CASE 0:
+            clock_envelopes(apu)
+        
+        CASE 1:
+            clock_envelopes(apu)
+            clock_length_counters(apu)
+            clock_sweeps(apu)
+        
+        CASE 2:
+            clock_envelopes(apu)
+        
+        CASE 3:
+            clock_envelopes(apu)
+            clock_length_counters(apu)
+            clock_sweeps(apu)
+            
+            IF NOT fc.irq_inhibit THEN
+                fc.interrupt_flag = true
+            END
+    END
+    
+    fc.step = (fc.step + 1) AND 3
+END
+
+FUNCTION clock_frame_5_step(apu: PTR[APU])
+    VAR fc: PTR[FrameCounter] = PTR[apu.frame_counter]
+    
+    SWITCH fc.step
+        CASE 0:
+            clock_envelopes(apu)
+        
+        CASE 1:
+            clock_envelopes(apu)
+            clock_length_counters(apu)
+            clock_sweeps(apu)
+        
+        CASE 2:
+            clock_envelopes(apu)
+        
+        CASE 3:
+            # Nothing
+        
+        CASE 4:
+            clock_envelopes(apu)
+            clock_length_counters(apu)
+            clock_sweeps(apu)
+    END
+    
+    fc.step = fc.step + 1
+    IF fc.step >= 5 THEN
+        fc.step = 0
+    END
+END
+
+# ============================================================================
+# COMPONENT CLOCKING
+# ============================================================================
+
+FUNCTION clock_envelopes(apu: PTR[APU])
+    clock_envelope(PTR[apu.pulse1.envelope])
+    clock_envelope(PTR[apu.pulse2.envelope])
+    clock_envelope(PTR[apu.noise.envelope])
+    clock_linear_counter(PTR[apu.triangle.linear_counter])
+END
+
+FUNCTION clock_envelope(env: PTR[Envelope])
+    IF env.start_flag THEN
+        env.start_flag = false
+        env.decay_level = 15
+        env.divider_counter = env.divider_period
+    ELSE
+        IF env.divider_counter == 0 THEN
+            env.divider_counter = env.divider_period
+            
+            IF env.decay_level > 0 THEN
+                env.decay_level = env.decay_level - 1
+            ELSE IF env.loop_flag THEN
+                env.decay_level = 15
+            END
+        ELSE
+            env.divider_counter = env.divider_counter - 1
+        END
+    END
+END
+
+FUNCTION clock_linear_counter(lc: PTR[LinearCounter])
+    IF lc.reload_flag THEN
+        lc.counter = lc.reload_value
+    ELSE IF lc.counter > 0 THEN
+        lc.counter = lc.counter - 1
+    END
+    
+    IF NOT lc.control_flag THEN
+        lc.reload_flag = false
+    END
+END
+
+FUNCTION clock_length_counters(apu: PTR[APU])
+    clock_length_counter(PTR[apu.pulse1.length_counter])
+    clock_length_counter(PTR[apu.pulse2.length_counter])
+    clock_length_counter(PTR[apu.triangle.length_counter])
+    clock_length_counter(PTR[apu.noise.length_counter])
+END
+
+FUNCTION clock_length_counter(lc: PTR[LengthCounter])
+    IF lc.value > 0 AND NOT lc.halt THEN
+        lc.value = lc.value - 1
+    END
+END
+
+FUNCTION clock_sweeps(apu: PTR[APU])
+    clock_sweep(PTR[apu.pulse1.sweep], PTR[apu.pulse1.timer], 0)
+    clock_sweep(PTR[apu.pulse2.sweep], PTR[apu.pulse2.timer], 1)
+END
+
+FUNCTION clock_sweep(sweep: PTR[Sweep], timer: PTR[Timer], channel: u8)
+    VAR change_amount: u16 = timer.period >> sweep.shift
+    
+    IF sweep.negate THEN
+        IF channel == 0 THEN
+            # Pulse 1 uses one's complement
+            change_amount = ~change_amount
+        ELSE
+            # Pulse 2 uses two's complement
+            change_amount = (~change_amount) + 1
+        END
+        sweep.target_period = timer.period + change_amount
+    ELSE
+        sweep.target_period = timer.period + change_amount
+    END
+    
+    IF sweep.divider == 0 AND sweep.enabled AND sweep.shift != 0 AND timer.period >= 8 AND sweep.target_period <= 0x7FF THEN
+        timer.period = sweep.target_period
+    END
+    
+    IF sweep.divider == 0 OR sweep.reload_flag THEN
+        sweep.divider = sweep.period
+        sweep.reload_flag = false
+    ELSE
+        sweep.divider = sweep.divider - 1
+    END
+END
+
+# ============================================================================
+# MIXER AND OUTPUT
+# ============================================================================
+
+FUNCTION mix_audio(apu: PTR[APU]) -> f32
+    # Get individual channel outputs
+    VAR pulse1_out: u8 = get_pulse_output(PTR[apu.pulse1])
+    VAR pulse2_out: u8 = get_pulse_output(PTR[apu.pulse2])
+    VAR triangle_out: u8 = apu.triangle.output
+    VAR noise_out: u8 = get_noise_output(PTR[apu.noise])
+    VAR dmc_out: u8 = apu.dmc.output
+    
+    # Non-linear mixing as per NES hardware
+    VAR pulse_out: f32
+    IF pulse1_out == 0 AND pulse2_out == 0 THEN
+        pulse_out = 0.0
+    ELSE
+        pulse_out = 95.52 / (8128.0 / (CAST(f32, pulse1_out) + CAST(f32, pulse2_out)) + 100.0)
+    END
+    
+    VAR tnd_out: f32
+    VAR tnd_sum: f32 = CAST(f32, triangle_out) / 8227.0 + CAST(f32, noise_out) / 12241.0 + CAST(f32, dmc_out) / 22638.0
+    IF tnd_sum == 0.0 THEN
+        tnd_out = 0.0
+    ELSE
+        tnd_out = 159.79 / (1.0 / tnd_sum + 100.0)
+    END
+    
+    RETURN pulse_out + tnd_out
+END
+
+# ============================================================================
+# MAIN APU STEP
+# ============================================================================
+
+FUNCTION apu_step(apu: PTR[APU], cpu_cycles: u32)
+    # Clock frame counter
+    clock_frame_counter(apu)
+    
+    # Clock timers (some run at CPU speed, others at CPU/2)
+    VAR i: u32 = 0
+    WHILE i < cpu_cycles DO
+        # Triangle runs at CPU speed
+        clock_triangle_timer(PTR[apu.triangle])
+        
+        # Pulse, noise, and DMC run at CPU/2
+        IF (i AND 1) == 0 THEN
+            clock_pulse_timer(PTR[apu.pulse1])
+            clock_pulse_timer(PTR[apu.pulse2])
+            clock_noise_timer(PTR[apu.noise])
+            clock_dmc_timer(PTR[apu.dmc], apu.cpu_frequency)
+        END
+        
+        i = i + 1
+    END
+    
+    # Generate audio samples
+    apu.cycle_counter = apu.cycle_counter + CAST(f32, cpu_cycles)
+    
+    WHILE apu.cycle_counter >= apu.cycles_per_sample DO
+        apu.cycle_counter = apu.cycle_counter - apu.cycles_per_sample
+        
+        # Mix and output sample
+        VAR sample: f32 = mix_audio(apu)
+        apu.audio_buffer[apu.buffer_position] = sample
+        apu.buffer_position = apu.buffer_position + 1
+        
+        # Flush buffer if full
+        IF apu.buffer_position >= 2048 THEN
+            AudioLib.queue_audio(apu.audio_device, apu.audio_buffer, 2048)
+            apu.buffer_position = 0
+        END
+    END
+END
+
+# ============================================================================
+# STATUS AND CONTROL
+# ============================================================================
+
+FUNCTION write_status(apu: PTR[APU], value: u8)
+    # Enable/disable channels
+    apu.dmc.enabled = (value AND DMC_ENABLE) != 0
+    apu.noise.enabled = (value AND NOISE_ENABLE) != 0
+    apu.triangle.enabled = (value AND TRIANGLE_ENABLE) != 0
+    apu.pulse2.enabled = (value AND PULSE2_ENABLE) != 0
+    apu.pulse1.enabled = (value AND PULSE1_ENABLE) != 0
+    
+    # Clear length counters for disabled channels
+    IF NOT apu.pulse1.enabled THEN
+        apu.pulse1.length_counter.value = 0
+    END
+    
+    IF NOT apu.pulse2.enabled THEN
+        apu.pulse2.length_counter.value = 0
+    END
+    
+    IF NOT apu.triangle.enabled THEN
+        apu.triangle.length_counter.value = 0
+    END
+    
+    IF NOT apu.noise.enabled THEN
+        apu.noise.length_counter.value = 0
+    END
+    
+    # DMC special handling
+    IF NOT apu.dmc.enabled THEN
+        apu.dmc.bytes_remaining = 0
+    ELSE IF apu.dmc.bytes_remaining == 0 THEN
+        # Restart sample
+        apu.dmc.current_address = apu.dmc.sample_address
+        apu.dmc.bytes_remaining = apu.dmc.sample_length
+    END
+    
+    # Clear DMC interrupt
+    apu.dmc.interrupt_flag = false
+END
+
+# ============================================================================
+# INTERRUPTS
+# ============================================================================
+
+FUNCTION apu_check_irq(apu: PTR[APU]) -> bool
+    RETURN apu.frame_counter.interrupt_flag OR apu.dmc.interrupt_flag
+END
+
+FUNCTION apu_clear_frame_irq(apu: PTR[APU])
+    apu.frame_counter.interrupt_flag = false
+END
+
+# ============================================================================
+# CLEANUP
+# ============================================================================
+
+FUNCTION apu_destroy(apu: PTR[APU])
+    # Flush remaining audio
+    IF apu.buffer_position > 0 THEN
+        AudioLib.queue_audio(apu.audio_device, apu.audio_buffer, apu.buffer_position)
+    END
+    
+    # Close audio device
+    AudioLib.close_device(apu.audio_device)
 END
 

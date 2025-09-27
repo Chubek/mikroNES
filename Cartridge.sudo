@@ -1,0 +1,711 @@
+# Cartridge.sudo - NES/Famicom Cartridge Hardware Emulation
+# Handles cartridge hardware, mapper chips, and memory banking
+
+IMPORT Memory
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+# Cartridge types
+CONST CART_TYPE_NES: u8 = 0
+CONST CART_TYPE_FAMICOM: u8 = 1
+CONST CART_TYPE_FDS: u8 = 2  # Famicom Disk System
+
+# Memory sizes
+CONST PRG_BANK_SIZE: u16 = 0x4000  # 16KB
+CONST CHR_BANK_SIZE: u16 = 0x2000  # 8KB
+CONST PRG_RAM_SIZE: u16 = 0x2000   # 8KB standard
+
+# Mirroring types
+CONST MIRROR_HORIZONTAL: u8 = 0
+CONST MIRROR_VERTICAL: u8 = 1
+CONST MIRROR_SINGLE_SCREEN_A: u8 = 2
+CONST MIRROR_SINGLE_SCREEN_B: u8 = 3
+CONST MIRROR_FOUR_SCREEN: u8 = 4
+
+# Bus conflicts
+CONST BUS_CONFLICT_NONE: u8 = 0
+CONST BUS_CONFLICT_YES: u8 = 1
+
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
+STRUCT CartridgeHeader
+    # iNES header fields
+    prg_rom_size: u16      # In 16KB units
+    chr_rom_size: u16      # In 8KB units (0 = CHR RAM)
+    mapper_number: u16     # Mapper ID
+    mirroring: u8          # Nametable mirroring
+    has_battery: bool      # Battery-backed PRG RAM
+    has_trainer: bool      # 512-byte trainer
+    four_screen_vram: bool # Four-screen mirroring
+    
+    # iNES 2.0 fields
+    ines_version: u8       # 1 or 2
+    prg_ram_size: u16      # PRG RAM/NVRAM size
+    prg_nvram_size: u16    # Battery-backed size
+    chr_ram_size: u16      # CHR RAM size
+    chr_nvram_size: u16    # Battery-backed CHR size
+    
+    # Extended fields
+    submapper: u8          # Submapper number
+    vs_system: bool        # VS System game
+    playchoice10: bool     # PlayChoice-10 game
+    tv_system: u8          # 0=NTSC, 1=PAL, 2=Dual
+    
+    # Miscellaneous ROM data
+    misc_rom_count: u8     # Number of miscellaneous ROMs
+    default_expansion: u8  # Default expansion device
+END
+
+STRUCT CartridgeChips
+    # Detected hardware
+    has_bus_conflicts: bool
+    has_prg_ram: bool
+    prg_ram_writable: bool
+    
+    # Special chips
+    has_mmc1: bool
+    has_mmc3: bool
+    has_mmc5: bool
+    has_vrc: bool
+    has_sunsoft: bool
+    has_konami: bool
+    has_namco: bool
+    has_bandai: bool
+    
+    # Audio expansion
+    has_extra_audio: bool
+    audio_chip_type: u8
+END
+
+STRUCT Cartridge
+    # Cartridge identification
+    type: u8               # NES/Famicom/FDS
+    region: u8             # NTSC/PAL
+    header: CartridgeHeader
+    chips: CartridgeChips
+    
+    # Memory arrays
+    prg_rom: PTR[u8]       # PRG ROM data
+    prg_rom_size: u32      # Actual size in bytes
+    chr_rom: PTR[u8]       # CHR ROM data (NULL if CHR RAM)
+    chr_rom_size: u32      # Actual size in bytes
+    
+    # RAM/NVRAM
+    prg_ram: PTR[u8]       # PRG RAM/Work RAM
+    prg_ram_size: u32      # Size in bytes
+    chr_ram: PTR[u8]       # CHR RAM (if no CHR ROM)
+    chr_ram_size: u32      # Size in bytes
+    
+    # Save data
+    save_ram: PTR[u8]      # Battery-backed RAM
+    save_ram_size: u32     # Size in bytes
+    save_ram_dirty: bool   # Needs saving
+    
+    # Mapper state
+    mapper: PTR[Mapper]    # Mapper implementation
+    
+    # Physical characteristics
+    connector_pins: u8     # 60 (Famicom) or 72 (NES)
+    has_lockout_chip: bool # CIC presence
+    
+    # Famicom-specific
+    has_expansion_audio: bool
+    has_mic_support: bool
+    
+    # Debug info
+    sha1_hash: ARRAY[20] OF u8
+    database_match: bool
+    game_title: STRING
+END
+
+# ============================================================================
+# MAPPER INTERFACE
+# ============================================================================
+
+STRUCT Mapper
+    # Mapper identification
+    id: u16
+    name: STRING
+    submapper: u8
+    
+    # Function pointers
+    reset: PTR[FUNCTION(mapper: PTR[Mapper])]
+    cpu_read: PTR[FUNCTION(mapper: PTR[Mapper], addr: u16) -> u8]
+    cpu_write: PTR[FUNCTION(mapper: PTR[Mapper], addr: u16, value: u8)]
+    ppu_read: PTR[FUNCTION(mapper: PTR[Mapper], addr: u16) -> u8]
+    ppu_write: PTR[FUNCTION(mapper: PTR[Mapper], addr: u16, value: u8)]
+    scanline: PTR[FUNCTION(mapper: PTR[Mapper])]
+    irq_clock: PTR[FUNCTION(mapper: PTR[Mapper])]
+    
+    # State
+    cartridge: PTR[Cartridge]  # Parent cartridge
+    irq_pending: bool
+    
+    # Common banking registers
+    prg_bank_select: ARRAY[4] OF u8
+    chr_bank_select: ARRAY[8] OF u8
+    
+    # Mapper-specific state pointer
+    private_data: PTR[void]
+END
+
+# ============================================================================
+# MAPPER 0 (NROM)
+# ============================================================================
+
+STRUCT Mapper0Data
+    # NROM has no banking
+    prg_32k_mode: bool  # false = 16KB mirrored, true = 32KB
+END
+
+FUNCTION mapper0_create(cart: PTR[Cartridge]) -> PTR[Mapper]
+    VAR mapper: PTR[Mapper] = ALLOCATE[Mapper]
+    VAR data: PTR[Mapper0Data] = ALLOCATE[Mapper0Data]
+    
+    mapper.id = 0
+    mapper.name = "NROM"
+    mapper.submapper = 0
+    mapper.cartridge = cart
+    mapper.irq_pending = false
+    
+    # Determine PRG mode
+    data.prg_32k_mode = (cart.prg_rom_size > 16384)
+    
+    mapper.private_data = CAST(PTR[void], data)
+    
+    # Set function pointers
+    mapper.reset = mapper0_reset
+    mapper.cpu_read = mapper0_cpu_read
+    mapper.cpu_write = mapper0_cpu_write
+    mapper.ppu_read = mapper0_ppu_read
+    mapper.ppu_write = mapper0_ppu_write
+    mapper.scanline = NULL
+    mapper.irq_clock = NULL
+    
+    RETURN mapper
+END
+
+FUNCTION mapper0_reset(mapper: PTR[Mapper])
+    # NROM has no reset behavior
+END
+
+FUNCTION mapper0_cpu_read(mapper: PTR[Mapper], addr: u16) -> u8
+    VAR cart: PTR[Cartridge] = mapper.cartridge
+    VAR data: PTR[Mapper0Data] = CAST(PTR[Mapper0Data], mapper.private_data)
+    
+    IF addr >= 0x6000 AND addr <= 0x7FFF THEN
+        # PRG RAM (if present)
+        IF cart.prg_ram != NULL THEN
+            RETURN cart.prg_ram[addr - 0x6000]
+        END
+        RETURN 0xFF  # Open bus
+        
+    ELSE IF addr >= 0x8000 THEN
+        # PRG ROM
+        VAR offset: u16
+        IF data.prg_32k_mode THEN
+            # 32KB: Direct mapping
+            offset = addr - 0x8000
+        ELSE
+            # 16KB: Mirrored at 0x8000 and 0xC000
+            offset = (addr - 0x8000) AND 0x3FFF
+        END
+        
+        RETURN cart.prg_rom[offset]
+    END
+    
+    RETURN 0xFF  # Open bus
+END
+
+FUNCTION mapper0_cpu_write(mapper: PTR[Mapper], addr: u16, value: u8)
+    VAR cart: PTR[Cartridge] = mapper.cartridge
+    
+    IF addr >= 0x6000 AND addr <= 0x7FFF THEN
+        # PRG RAM (if present and writable)
+        IF cart.prg_ram != NULL AND cart.chips.prg_ram_writable THEN
+            cart.prg_ram[addr - 0x6000] = value
+            IF cart.has_battery THEN
+                cart.save_ram_dirty = true
+            END
+        END
+    END
+    # PRG ROM area writes are ignored
+END
+
+FUNCTION mapper0_ppu_read(mapper: PTR[Mapper], addr: u16) -> u8
+    VAR cart: PTR[Cartridge] = mapper.cartridge
+    
+    IF addr < 0x2000 THEN
+        # Pattern tables
+        IF cart.chr_rom != NULL THEN
+            # CHR ROM
+            RETURN cart.chr_rom[addr]
+        ELSE IF cart.chr_ram != NULL THEN
+            # CHR RAM
+            RETURN cart.chr_ram[addr]
+        END
+    END
+    
+    RETURN 0xFF  # Open bus
+END
+
+FUNCTION mapper0_ppu_write(mapper: PTR[Mapper], addr: u16, value: u8)
+    VAR cart: PTR[Cartridge] = mapper.cartridge
+    
+    IF addr < 0x2000 THEN
+        # Pattern tables - only writable if CHR RAM
+        IF cart.chr_ram != NULL THEN
+            cart.chr_ram[addr] = value
+        END
+    END
+END
+
+# ============================================================================
+# MAPPER FACTORY
+# ============================================================================
+
+FUNCTION create_mapper(cart: PTR[Cartridge]) -> PTR[Mapper]
+    SWITCH cart.header.mapper_number
+        CASE 0:
+            RETURN mapper0_create(cart)
+            
+        CASE 1:
+            RETURN mapper1_create(cart)  # MMC1
+            
+        CASE 2:
+            RETURN mapper2_create(cart)  # UxROM
+            
+        CASE 3:
+            RETURN mapper3_create(cart)  # CNROM
+            
+        CASE 4:
+            RETURN mapper4_create(cart)  # MMC3
+            
+        CASE 7:
+            RETURN mapper7_create(cart)  # AxROM
+            
+        CASE 9:
+            RETURN mapper9_create(cart)  # MMC2
+            
+        CASE 10:
+            RETURN mapper10_create(cart) # MMC4
+            
+        CASE 11:
+            RETURN mapper11_create(cart) # Color Dreams
+            
+        CASE 16:
+            RETURN mapper16_create(cart) # Bandai FCG
+            
+        CASE 18:
+            RETURN mapper18_create(cart) # Jaleco SS88006
+            
+        CASE 19:
+            RETURN mapper19_create(cart) # Namco 163
+            
+        CASE 21:
+        CASE 22:
+        CASE 23:
+        CASE 25:
+            RETURN mapper_vrc_create(cart, cart.header.mapper_number) # VRC
+            
+        CASE 24:
+        CASE 26:
+            RETURN mapper_vrc6_create(cart) # VRC6
+            
+        CASE 34:
+            RETURN mapper34_create(cart) # BNROM/NINA-001
+            
+        CASE 66:
+            RETURN mapper66_create(cart) # GxROM
+            
+        CASE 69:
+            RETURN mapper69_create(cart) # FME-7
+            
+        CASE 71:
+            RETURN mapper71_create(cart) # Camerica
+            
+        CASE 85:
+            RETURN mapper85_create(cart) # VRC7
+            
+        DEFAULT:
+            # Unsupported mapper - default to NROM behavior
+            PRINT("Warning: Unsupported mapper " + STR(cart.header.mapper_number))
+            RETURN mapper0_create(cart)
+    END
+END
+
+# ============================================================================
+# CARTRIDGE CREATION AND MANAGEMENT
+# ============================================================================
+
+FUNCTION cartridge_create() -> PTR[Cartridge]
+    VAR cart: PTR[Cartridge] = ALLOCATE[Cartridge]
+    
+    # Initialize to defaults
+    cart.type = CART_TYPE_NES
+    cart.region = 0  # NTSC
+    cart.connector_pins = 72
+    cart.has_lockout_chip = true
+    
+    # Clear memory pointers
+    cart.prg_rom = NULL
+    cart.chr_rom = NULL
+    cart.prg_ram = NULL
+    cart.chr_ram = NULL
+    cart.save_ram = NULL
+    cart.mapper = NULL
+    
+    cart.save_ram_dirty = false
+    cart.database_match = false
+    cart.game_title = "Unknown"
+    
+    RETURN cart
+END
+
+FUNCTION cartridge_destroy(cart: PTR[Cartridge])
+    IF cart == NULL THEN RETURN END
+    
+    # Save battery-backed RAM if needed
+    IF cart.save_ram_dirty AND cart.save_ram != NULL THEN
+        cartridge_save_battery_ram(cart)
+    END
+    
+    # Free memory
+    IF cart.prg_rom != NULL THEN FREE(cart.prg_rom) END
+    IF cart.chr_rom != NULL THEN FREE(cart.chr_rom) END
+    IF cart.prg_ram != NULL THEN FREE(cart.prg_ram) END
+    IF cart.chr_ram != NULL THEN FREE(cart.chr_ram) END
+    IF cart.save_ram != NULL THEN FREE(cart.save_ram) END
+    
+    # Destroy mapper
+    IF cart.mapper != NULL THEN
+        mapper_destroy(cart.mapper)
+    END
+    
+    FREE(cart)
+END
+
+FUNCTION cartridge_allocate_memory(cart: PTR[Cartridge])
+    # Allocate PRG ROM
+    cart.prg_rom_size = cart.header.prg_rom_size * PRG_BANK_SIZE
+    cart.prg_rom = ALLOCATE_ARRAY[u8](cart.prg_rom_size)
+    
+    # Allocate CHR memory
+    IF cart.header.chr_rom_size > 0 THEN
+        # CHR ROM
+        cart.chr_rom_size = cart.header.chr_rom_size * CHR_BANK_SIZE
+        cart.chr_rom = ALLOCATE_ARRAY[u8](cart.chr_rom_size)
+    ELSE
+        # CHR RAM
+        cart.chr_ram_size = IF cart.header.chr_ram_size > 0 
+                           THEN cart.header.chr_ram_size 
+                           ELSE CHR_BANK_SIZE
+        cart.chr_ram = ALLOCATE_ARRAY[u8](cart.chr_ram_size)
+    END
+    
+    # Allocate PRG RAM
+    IF cart.header.prg_ram_size > 0 OR cart.chips.has_prg_ram THEN
+        cart.prg_ram_size = IF cart.header.prg_ram_size > 0
+                           THEN cart.header.prg_ram_size
+                           ELSE PRG_RAM_SIZE
+        cart.prg_ram = ALLOCATE_ARRAY[u8](cart.prg_ram_size)
+        
+        # Battery-backed portion
+        IF cart.header.has_battery THEN
+            cart.save_ram = cart.prg_ram  # Point to same memory
+            cart.save_ram_size = cart.prg_ram_size
+        END
+    END
+END
+
+# ============================================================================
+# CARTRIDGE I/O
+# ============================================================================
+
+FUNCTION cartridge_cpu_read(cart: PTR[Cartridge], addr: u16) -> u8
+    IF cart.mapper != NULL AND cart.mapper.cpu_read != NULL THEN
+        RETURN cart.mapper.cpu_read(cart.mapper, addr)
+    END
+    RETURN 0xFF  # Open bus
+END
+
+FUNCTION cartridge_cpu_write(cart: PTR[Cartridge], addr: u16, value: u8)
+    IF cart.mapper != NULL AND cart.mapper.cpu_write != NULL THEN
+        cart.mapper.cpu_write(cart.mapper, addr, value)
+    END
+END
+
+FUNCTION cartridge_ppu_read(cart: PTR[Cartridge], addr: u16) -> u8
+    IF cart.mapper != NULL AND cart.mapper.ppu_read != NULL THEN
+        RETURN cart.mapper.ppu_read(cart.mapper, addr)
+    END
+    RETURN 0xFF  # Open bus
+END
+
+FUNCTION cartridge_ppu_write(cart: PTR[Cartridge], addr: u16, value: u8)
+    IF cart.mapper != NULL AND cart.mapper.ppu_write != NULL THEN
+        cart.mapper.ppu_write(cart.mapper, addr, value)
+    END
+END
+
+# ============================================================================
+# CARTRIDGE UTILITIES
+# ============================================================================
+
+FUNCTION cartridge_get_mirroring(cart: PTR[Cartridge]) -> u8
+    # Some mappers can override the header mirroring
+    IF cart.mapper != NULL THEN
+        # Check for mapper-controlled mirroring
+        # This would be implemented per-mapper
+    END
+    
+    RETURN cart.header.mirroring
+END
+
+FUNCTION cartridge_scanline(cart: PTR[Cartridge])
+    IF cart.mapper != NULL AND cart.mapper.scanline != NULL THEN
+        cart.mapper.scanline(cart.mapper)
+    END
+END
+
+FUNCTION cartridge_check_irq(cart: PTR[Cartridge]) -> bool
+    IF cart.mapper != NULL THEN
+        RETURN cart.mapper.irq_pending
+    END
+    RETURN false
+END
+
+FUNCTION cartridge_clock_irq(cart: PTR[Cartridge])
+    IF cart.mapper != NULL AND cart.mapper.irq_clock != NULL THEN
+        cart.mapper.irq_clock(cart.mapper)
+    END
+END
+
+# ============================================================================
+# SAVE DATA MANAGEMENT
+# ============================================================================
+
+FUNCTION cartridge_save_battery_ram(cart: PTR[Cartridge]) -> bool
+    IF cart.save_ram == NULL OR cart.save_ram_size == 0 THEN
+        RETURN false
+    END
+    
+    # Generate save filename from game title or hash
+    VAR filename: STRING = cart.game_title + ".sav"
+    
+    # Write save data to file
+    VAR success: bool = write_file(filename, cart.save_ram, cart.save_ram_size)
+    
+    IF success THEN
+        cart.save_ram_dirty = false
+    END
+    
+    RETURN success
+END
+
+FUNCTION cartridge_load_battery_ram(cart: PTR[Cartridge]) -> bool
+    IF cart.save_ram == NULL OR cart.save_ram_size == 0 THEN
+        RETURN false
+    END
+    
+    # Generate save filename from game title or hash
+    VAR filename: STRING = cart.game_title + ".sav"
+    
+    # Read save data from file
+    VAR size: u32
+    VAR data: PTR[u8] = read_file(filename, &size)
+    
+    IF data != NULL THEN
+        # Copy data to save RAM
+        VAR copy_size: u32 = MIN(size, cart.save_ram_size)
+        MEMCPY(cart.save_ram, data, copy_size)
+        FREE(data)
+        RETURN true
+    END
+    
+    RETURN false
+END
+
+# ============================================================================
+# HARDWARE DETECTION
+# ============================================================================
+
+FUNCTION cartridge_detect_hardware(cart: PTR[Cartridge])
+    # Detect special hardware based on mapper
+    SWITCH cart.header.mapper_number
+        CASE 0:
+            # NROM - basic configuration
+            cart.chips.has_bus_conflicts = false
+            
+        CASE 1:
+            # MMC1
+            cart.chips.has_mmc1 = true
+            cart.chips.has_prg_ram = true
+            cart.chips.prg_ram_writable = true
+            
+        CASE 4:
+            # MMC3
+            cart.chips.has_mmc3 = true
+            cart.chips.has_prg_ram = true
+            
+        CASE 5:
+            # MMC5
+            cart.chips.has_mmc5 = true
+            cart.chips.has_extra_audio = true
+            cart.chips.audio_chip_type = 1  # MMC5 audio
+            
+        CASE 19:
+            # Namco 163
+            cart.chips.has_namco = true
+            cart.chips.has_extra_audio = true
+            cart.chips.audio_chip_type = 2  # N163 audio
+            
+        CASE 24:
+        CASE 26:
+            # VRC6
+            cart.chips.has_vrc = true
+            cart.chips.has_extra_audio = true
+            cart.chips.audio_chip_type = 3  # VRC6 audio
+            
+        CASE 69:
+            # Sunsoft FME-7
+            cart.chips.has_sunsoft = true
+            cart.chips.has_extra_audio = true
+            cart.chips.audio_chip_type = 4  # FME-7 audio
+            
+        CASE 85:
+            # VRC7
+            cart.chips.has_vrc = true
+            cart.chips.has_extra_audio = true
+            cart.chips.audio_chip_type = 5  # VRC7 (YM2413)
+    END
+    
+    # Famicom-specific features
+    IF cart.type == CART_TYPE_FAMICOM THEN
+        cart.connector_pins = 60
+        cart.has_lockout_chip = false
+        
+        # Some Famicom games use expansion audio
+        IF cart.chips.has_extra_audio THEN
+            cart.has_expansion_audio = true
+        END
+    END
+END
+
+# ============================================================================
+# DATABASE LOOKUP
+# ============================================================================
+
+FUNCTION cartridge_lookup_database(cart: PTR[Cartridge]) -> bool
+    # Calculate SHA1 of PRG+CHR ROM
+    calculate_sha1(cart.prg_rom, cart.prg_rom_size, 
+                   cart.chr_rom, cart.chr_rom_size,
+                   cart.sha1_hash)
+    
+    # Look up in game database
+    VAR info: GameInfo = database_lookup_by_hash(cart.sha1_hash)
+    
+    IF info.found THEN
+        cart.database_match = true
+        cart.game_title = info.title
+        
+        # Override header info with database
+        IF info.mapper_override >= 0 THEN
+            cart.header.mapper_number = info.mapper_override
+        END
+        
+        IF info.submapper_override >= 0 THEN
+            cart.header.submapper = info.submapper_override
+        END
+        
+        IF info.mirroring_override >= 0 THEN
+            cart.header.mirroring = info.mirroring_override
+        END
+        
+        # Set region
+        cart.region = info.region
+        
+        # Special hardware flags
+        IF info.has_bus_conflicts THEN
+            cart.chips.has_bus_conflicts = true
+        END
+        
+        RETURN true
+    END
+    
+    RETURN false
+END
+
+# ============================================================================
+# DEBUG INFORMATION
+# ============================================================================
+
+FUNCTION cartridge_get_info_string(cart: PTR[Cartridge]) -> STRING
+    VAR info: STRING = "Cartridge Information:\n"
+    
+    info = info + "  Title: " + cart.game_title + "\n"
+    info = info + "  Type: " + IF cart.type == CART_TYPE_NES THEN "NES" ELSE "Famicom" END + "\n"
+    info = info + "  Region: " + IF cart.region == 0 THEN "NTSC" ELSE "PAL" END + "\n"
+    info = info + "  Mapper: " + STR(cart.header.mapper_number)
+    
+    IF cart.mapper != NULL THEN
+        info = info + " (" + cart.mapper.name + ")"
+    END
+    info = info + "\n"
+    
+    info = info + "  PRG ROM: " + STR(cart.header.prg_rom_size) + " x 16KB\n"
+    info = info + "  CHR ROM: " + STR(cart.header.chr_rom_size) + " x 8KB\n"
+    
+    IF cart.chr_ram != NULL THEN
+        info = info + "  CHR RAM: " + STR(cart.chr_ram_size) + " bytes\n"
+    END
+    
+    IF cart.prg_ram != NULL THEN
+        info = info + "  PRG RAM: " + STR(cart.prg_ram_size) + " bytes"
+        IF cart.header.has_battery THEN
+            info = info + " (battery-backed)"
+        END
+        info = info + "\n"
+    END
+    
+    info = info + "  Mirroring: "
+    SWITCH cart.header.mirroring
+        CASE MIRROR_HORIZONTAL:
+            info = info + "Horizontal"
+        CASE MIRROR_VERTICAL:
+            info = info + "Vertical"
+        CASE MIRROR_FOUR_SCREEN:
+            info = info + "Four-screen"
+    END
+    info = info + "\n"
+    
+    IF cart.chips.has_extra_audio THEN
+        info = info + "  Extra Audio: Yes\n"
+    END
+    
+    IF cart.database_match THEN
+        info = info + "  Database: Matched\n"
+    END
+    
+    RETURN info
+END
+
+# ============================================================================
+# MAPPER DESTRUCTION
+# ============================================================================
+
+FUNCTION mapper_destroy(mapper: PTR[Mapper])
+    IF mapper == NULL THEN RETURN END
+    
+    # Free mapper-specific data
+    IF mapper.private_data != NULL THEN
+        FREE(mapper.private_data)
+    END
+    
+    FREE(mapper)
+END
+

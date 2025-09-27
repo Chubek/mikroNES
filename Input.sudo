@@ -1,0 +1,628 @@
+# Input.sudo - NES Controller Input Handling
+# Manages standard controllers, Four Score, and other input devices
+
+IMPORT Memory
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+# Controller button bits (as they appear in the shift register)
+CONST BUTTON_A: u8 = 0x01
+CONST BUTTON_B: u8 = 0x02
+CONST BUTTON_SELECT: u8 = 0x04
+CONST BUTTON_START: u8 = 0x08
+CONST BUTTON_UP: u8 = 0x10
+CONST BUTTON_DOWN: u8 = 0x20
+CONST BUTTON_LEFT: u8 = 0x40
+CONST BUTTON_RIGHT: u8 = 0x80
+
+# Controller states
+CONST CONTROLLER_DISCONNECTED: u8 = 0xFF
+
+# Four Score signature bits
+CONST FOUR_SCORE_SIGNATURE_1: u8 = 0x10
+CONST FOUR_SCORE_SIGNATURE_2: u8 = 0x20
+
+# Zapper detection
+CONST ZAPPER_TRIGGER: u8 = 0x10
+CONST ZAPPER_LIGHT: u8 = 0x08
+
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
+STRUCT StandardController
+    # Current button states (1 = pressed)
+    buttons: u8
+    
+    # Shift register state
+    shift_register: u8
+    strobe: bool
+    shift_count: u8
+END
+
+STRUCT FourScore
+    # Four controllers
+    controllers: ARRAY[4] OF StandardController
+    
+    # Signature bits for detection
+    signature_mode: bool
+    read_count: u8
+END
+
+STRUCT Zapper
+    trigger_pressed: bool
+    light_detected: bool
+    
+    # Screen coordinates for light detection
+    x_position: u16
+    y_position: u16
+    
+    # PPU integration for light detection
+    detection_window: u8  # Frames to check after trigger
+END
+
+STRUCT Arkanoid
+    # Arkanoid Vaus controller (paddle)
+    position: u8  # 0-255 paddle position
+    button_pressed: bool
+    
+    # Serial communication state
+    shift_register: u32
+    bit_count: u8
+    read_in_progress: bool
+END
+
+STRUCT InputSystem
+    # Controller ports
+    controller_1: StandardController
+    controller_2: StandardController
+    
+    # Expansion port devices
+    four_score: PTR[FourScore]
+    zapper: PTR[Zapper]
+    arkanoid: PTR[Arkanoid]
+    
+    # Port configuration
+    port_1_device: u8  # 0=controller, 1=zapper, 2=arkanoid
+    port_2_device: u8  # 0=controller, 1=zapper, 2=arkanoid
+    expansion_device: u8  # 0=none, 1=four_score
+    
+    # Global strobe state
+    strobe_latch: bool
+    
+    # Open bus behavior
+    last_write: u8
+END
+
+# ============================================================================
+# INPUT SYSTEM CREATION
+# ============================================================================
+
+FUNCTION input_create() -> PTR[InputSystem]
+    VAR input: PTR[InputSystem] = ALLOCATE[InputSystem]
+    
+    # Initialize controllers
+    input.controller_1.buttons = 0
+    input.controller_1.shift_register = 0
+    input.controller_1.strobe = false
+    input.controller_1.shift_count = 0
+    
+    input.controller_2.buttons = 0
+    input.controller_2.shift_register = 0
+    input.controller_2.strobe = false
+    input.controller_2.shift_count = 0
+    
+    # Default configuration
+    input.port_1_device = 0  # Standard controller
+    input.port_2_device = 0  # Standard controller
+    input.expansion_device = 0  # No expansion
+    
+    input.strobe_latch = false
+    input.last_write = 0
+    
+    RETURN input
+END
+
+# ============================================================================
+# CONTROLLER STATE UPDATES
+# ============================================================================
+
+FUNCTION update_controller_state(controller: PTR[StandardController], 
+                               a: bool, b: bool, select: bool, start: bool,
+                               up: bool, down: bool, left: bool, right: bool)
+    controller.buttons = 0
+    
+    IF a THEN controller.buttons = controller.buttons OR BUTTON_A END
+    IF b THEN controller.buttons = controller.buttons OR BUTTON_B END
+    IF select THEN controller.buttons = controller.buttons OR BUTTON_SELECT END
+    IF start THEN controller.buttons = controller.buttons OR BUTTON_START END
+    IF up THEN controller.buttons = controller.buttons OR BUTTON_UP END
+    IF down THEN controller.buttons = controller.buttons OR BUTTON_DOWN END
+    IF left THEN controller.buttons = controller.buttons OR BUTTON_LEFT END
+    IF right THEN controller.buttons = controller.buttons OR BUTTON_RIGHT END
+    
+    # Prevent impossible states (up+down or left+right)
+    IF (controller.buttons AND BUTTON_UP) != 0 AND 
+       (controller.buttons AND BUTTON_DOWN) != 0 THEN
+        controller.buttons = controller.buttons AND NOT (BUTTON_UP OR BUTTON_DOWN)
+    END
+    
+    IF (controller.buttons AND BUTTON_LEFT) != 0 AND 
+       (controller.buttons AND BUTTON_RIGHT) != 0 THEN
+        controller.buttons = controller.buttons AND NOT (BUTTON_LEFT OR BUTTON_RIGHT)
+    END
+END
+
+# Public API for setting controller states
+FUNCTION input_set_controller_1(input: PTR[InputSystem], 
+                               a: bool, b: bool, select: bool, start: bool,
+                               up: bool, down: bool, left: bool, right: bool)
+    update_controller_state(&input.controller_1, a, b, select, start, 
+                          up, down, left, right)
+END
+
+FUNCTION input_set_controller_2(input: PTR[InputSystem], 
+                               a: bool, b: bool, select: bool, start: bool,
+                               up: bool, down: bool, left: bool, right: bool)
+    update_controller_state(&input.controller_2, a, b, select, start, 
+                          up, down, left, right)
+END
+
+# ============================================================================
+# STANDARD CONTROLLER LOGIC
+# ============================================================================
+
+FUNCTION controller_reload(controller: PTR[StandardController])
+    # Load current button state into shift register
+    controller.shift_register = controller.buttons
+    controller.shift_count = 0
+END
+
+FUNCTION controller_read(controller: PTR[StandardController]) -> u8
+    VAR result: u8 = 0x40  # Open bus bits 6-7
+    
+    IF controller.strobe THEN
+        # When strobe is high, always return A button state
+        result = result OR (controller.buttons AND 0x01)
+    ELSE
+        # Return current bit and shift
+        IF controller.shift_count < 8 THEN
+            result = result OR (controller.shift_register AND 0x01)
+            controller.shift_register = controller.shift_register >> 1
+            controller.shift_count = controller.shift_count + 1
+        ELSE
+            # After 8 reads, return 1 (pulled high)
+            result = result OR 0x01
+        END
+    END
+    
+    RETURN result
+END
+
+# ============================================================================
+# FOUR SCORE LOGIC
+# ============================================================================
+
+FUNCTION four_score_create() -> PTR[FourScore]
+    VAR fs: PTR[FourScore] = ALLOCATE[FourScore]
+    
+    VAR i: u8 = 0
+    WHILE i < 4 DO
+        fs.controllers[i].buttons = 0
+        fs.controllers[i].shift_register = 0
+        fs.controllers[i].strobe = false
+        fs.controllers[i].shift_count = 0
+        i = i + 1
+    END
+    
+    fs.signature_mode = false
+    fs.read_count = 0
+    
+    RETURN fs
+END
+
+FUNCTION four_score_write(fs: PTR[FourScore], value: u8)
+    VAR strobe: bool = (value AND 0x01) != 0
+    
+    VAR i: u8 = 0
+    WHILE i < 4 DO
+        fs.controllers[i].strobe = strobe
+        IF strobe THEN
+            controller_reload(&fs.controllers[i])
+        END
+        i = i + 1
+    END
+    
+    IF strobe THEN
+        fs.read_count = 0
+        fs.signature_mode = false
+    END
+END
+
+FUNCTION four_score_read_1(fs: PTR[FourScore]) -> u8
+    # Port 1 returns controller 1 & 3 data
+    IF fs.read_count < 8 THEN
+        # Controller 1 data
+        VAR result: u8 = controller_read(&fs.controllers[0])
+        fs.read_count = fs.read_count + 1
+        RETURN result
+    ELSE IF fs.read_count < 16 THEN
+        # Controller 3 data
+        VAR result: u8 = controller_read(&fs.controllers[2])
+        fs.read_count = fs.read_count + 1
+        RETURN result
+    ELSE IF fs.read_count < 24 THEN
+        # Signature
+        fs.read_count = fs.read_count + 1
+        RETURN FOUR_SCORE_SIGNATURE_1
+    ELSE
+        RETURN 0x00
+    END
+END
+
+FUNCTION four_score_read_2(fs: PTR[FourScore]) -> u8
+    # Port 2 returns controller 2 & 4 data
+    IF fs.read_count < 8 THEN
+        # Controller 2 data
+        RETURN controller_read(&fs.controllers[1])
+    ELSE IF fs.read_count < 16 THEN
+        # Controller 4 data
+        RETURN controller_read(&fs.controllers[3])
+    ELSE IF fs.read_count < 24 THEN
+        # Signature
+        RETURN FOUR_SCORE_SIGNATURE_2
+    ELSE
+        RETURN 0x00
+    END
+END
+
+# ============================================================================
+# ZAPPER LOGIC
+# ============================================================================
+
+FUNCTION zapper_create() -> PTR[Zapper]
+    VAR zapper: PTR[Zapper] = ALLOCATE[Zapper]
+    
+    zapper.trigger_pressed = false
+    zapper.light_detected = false
+    zapper.x_position = 0
+    zapper.y_position = 0
+    zapper.detection_window = 0
+    
+    RETURN zapper
+END
+
+FUNCTION zapper_update_position(zapper: PTR[Zapper], x: u16, y: u16)
+    zapper.x_position = x
+    zapper.y_position = y
+END
+
+FUNCTION zapper_pull_trigger(zapper: PTR[Zapper])
+    zapper.trigger_pressed = true
+    zapper.detection_window = 2  # Check for 2 frames
+END
+
+FUNCTION zapper_release_trigger(zapper: PTR[Zapper])
+    zapper.trigger_pressed = false
+END
+
+FUNCTION zapper_check_light(zapper: PTR[Zapper], ppu: PTR[PPU.PPU]) -> bool
+    IF zapper.detection_window == 0 THEN
+        RETURN false
+    END
+    
+    # Check if PPU is currently drawing a bright pixel at zapper position
+    # This is simplified - real implementation would check during active scanline
+    VAR pixel_color: u8 = PPU.ppu_get_pixel_brightness(ppu, 
+                                                      zapper.x_position, 
+                                                      zapper.y_position)
+    
+    # Light detected if pixel is bright enough (white or light colors)
+    RETURN pixel_color > 0x20
+END
+
+FUNCTION zapper_read(zapper: PTR[Zapper]) -> u8
+    VAR result: u8 = 0
+    
+    IF NOT zapper.trigger_pressed THEN
+        result = result OR ZAPPER_TRIGGER
+    END
+    
+    IF NOT zapper.light_detected THEN
+        result = result OR ZAPPER_LIGHT
+    END
+    
+    RETURN result
+END
+
+FUNCTION zapper_step(zapper: PTR[Zapper], ppu: PTR[PPU.PPU])
+    IF zapper.detection_window > 0 THEN
+        zapper.light_detected = zapper_check_light(zapper, ppu)
+        zapper.detection_window = zapper.detection_window - 1
+    ELSE
+        zapper.light_detected = false
+    END
+END
+
+# ============================================================================
+# PORT I/O
+# ============================================================================
+
+FUNCTION write_controller(input: PTR[InputSystem], value: u8)
+    input.strobe_latch = (value AND 0x01) != 0
+    input.last_write = value
+    
+    # Standard controllers
+    input.controller_1.strobe = input.strobe_latch
+    input.controller_2.strobe = input.strobe_latch
+    
+    IF input.strobe_latch THEN
+        controller_reload(&input.controller_1)
+        controller_reload(&input.controller_2)
+    END
+    
+    # Four Score
+    IF input.expansion_device == 1 AND input.four_score != NULL THEN
+        four_score_write(input.four_score, value)
+    END
+    
+    # Expansion port devices may also respond to strobe
+END
+
+FUNCTION read_controller_1(input: PTR[InputSystem]) -> u8
+    # Four Score takes precedence
+    IF input.expansion_device == 1 AND input.four_score != NULL THEN
+        RETURN four_score_read_1(input.four_score)
+    END
+    
+    # Check port 1 device
+    SWITCH input.port_1_device
+        CASE 0:  # Standard controller
+            RETURN controller_read(&input.controller_1)
+            
+        CASE 1:  # Zapper
+            IF input.zapper != NULL THEN
+                RETURN zapper_read(input.zapper)
+            END
+            
+        CASE 2:  # Arkanoid
+            IF input.arkanoid != NULL THEN
+                RETURN arkanoid_read(input.arkanoid)
+            END
+    END
+    
+    # Open bus
+    RETURN input.last_write AND 0x1F
+END
+
+FUNCTION read_controller_2(input: PTR[InputSystem]) -> u8
+    VAR result: u8 = 0
+    
+    # Four Score takes precedence
+    IF input.expansion_device == 1 AND input.four_score != NULL THEN
+        result = four_score_read_2(input.four_score)
+    ELSE
+        # Check port 2 device
+        SWITCH input.port_2_device
+            CASE 0:  # Standard controller
+                result = controller_read(&input.controller_2)
+                
+            CASE 1:  # Zapper
+                IF input.zapper != NULL THEN
+                    result = zapper_read(input.zapper)
+                END
+                
+            CASE 2:  # Arkanoid
+                IF input.arkanoid != NULL THEN
+                    result = arkanoid_read(input.arkanoid)
+                END
+                
+            DEFAULT:
+                result = input.last_write AND 0x1F
+        END
+    END
+    
+    # Port 2 includes some additional bits from other sources
+    # Bits 0-4: Controller/device data
+    # Bit 5: From expansion port (some games use this)
+    # Bits 6-7: Open bus
+    
+    RETURN (result AND 0x1F) OR (input.last_write AND 0xE0)
+END
+
+# ============================================================================
+# ARKANOID CONTROLLER
+# ============================================================================
+
+FUNCTION arkanoid_create() -> PTR[Arkanoid]
+    VAR ark: PTR[Arkanoid] = ALLOCATE[Arkanoid]
+    
+    ark.position = 128  # Center position
+    ark.button_pressed = false
+    ark.shift_register = 0
+    ark.bit_count = 0
+    ark.read_in_progress = false
+    
+    RETURN ark
+END
+
+FUNCTION arkanoid_set_position(ark: PTR[Arkanoid], position: u8)
+    ark.position = position
+END
+
+FUNCTION arkanoid_set_button(ark: PTR[Arkanoid], pressed: bool)
+    ark.button_pressed = pressed
+END
+
+FUNCTION arkanoid_read(ark: PTR[Arkanoid]) -> u8
+    # Arkanoid controller returns potentiometer position
+    # Format: 98 bits total
+    # - 74 bits of position data
+    # - 8 bits button state
+    # - 16 bits signature
+    
+    IF NOT ark.read_in_progress THEN
+        # Start new read sequence
+        ark.shift_register = (CAST(u32, ark.position) << 16) OR 
+                           (IF ark.button_pressed THEN 0xFF00 ELSE 0x0000) OR
+                           0x00FF  # Signature
+        ark.bit_count = 0
+        ark.read_in_progress = true
+    END
+    
+    VAR result: u8 = 0x40  # Open bus bits
+    
+    IF ark.bit_count < 32 THEN
+        result = result OR ((ark.shift_register >> 31) AND 0x01)
+        ark.shift_register = ark.shift_register << 1
+        ark.bit_count = ark.bit_count + 1
+    ELSE
+        # After all bits read, return high
+        result = result OR 0x01
+    END
+    
+    RETURN result
+END
+
+# ============================================================================
+# DEVICE CONFIGURATION
+# ============================================================================
+
+FUNCTION input_connect_four_score(input: PTR[InputSystem])
+    IF input.four_score == NULL THEN
+        input.four_score = four_score_create()
+    END
+    input.expansion_device = 1
+END
+
+FUNCTION input_connect_zapper(input: PTR[InputSystem], port: u8)
+    IF input.zapper == NULL THEN
+        input.zapper = zapper_create()
+    END
+    
+    IF port == 1 THEN
+        input.port_1_device = 1
+    ELSE IF port == 2 THEN
+        input.port_2_device = 1
+    END
+END
+
+FUNCTION input_connect_arkanoid(input: PTR[InputSystem], port: u8)
+    IF input.arkanoid == NULL THEN
+        input.arkanoid = arkanoid_create()
+    END
+    
+    IF port == 1 THEN
+        input.port_1_device = 2
+    ELSE IF port == 2 THEN
+        input.port_2_device = 2
+    END
+END
+
+# ============================================================================
+# FRAME UPDATE
+# ============================================================================
+
+FUNCTION input_frame_update(input: PTR[InputSystem], ppu: PTR[PPU.PPU])
+    # Update zapper light detection
+    IF input.zapper != NULL THEN
+        zapper_step(input.zapper, ppu)
+    END
+END
+
+# ============================================================================
+# DEBUG HELPERS
+# ============================================================================
+
+FUNCTION input_get_controller_state_string(controller: PTR[StandardController]) -> STRING
+    VAR str: STRING = "["
+    
+    IF (controller.buttons AND BUTTON_UP) != 0 THEN str = str + "U" ELSE str = str + "-" END
+    IF (controller.buttons AND BUTTON_DOWN) != 0 THEN str = str + "D" ELSE str = str + "-" END
+    IF (controller.buttons AND BUTTON_LEFT) != 0 THEN str = str + "L" ELSE str = str + "-" END
+    IF (controller.buttons AND BUTTON_RIGHT) != 0 THEN str = str + "R" ELSE str = str + "-" END
+    str = str + " "
+    IF (controller.buttons AND BUTTON_SELECT) != 0 THEN str = str + "Se" ELSE str = str + "--" END
+    IF (controller.buttons AND BUTTON_START) != 0 THEN str = str + "St" ELSE str = str + "--" END
+    str = str + " "
+    IF (controller.buttons AND BUTTON_B) != 0 THEN str = str + "B" ELSE str = str + "-" END
+    IF (controller.buttons AND BUTTON_A) != 0 THEN str = str + "A" ELSE str = str + "-" END
+    
+    str = str + "]"
+    RETURN str
+END
+
+FUNCTION input_get_device_name(device_type: u8) -> STRING
+    SWITCH device_type
+        CASE 0:
+            RETURN "Standard Controller"
+        CASE 1:
+            RETURN "Zapper Light Gun"
+        CASE 2:
+            RETURN "Arkanoid Controller"
+        DEFAULT:
+            RETURN "Unknown Device"
+    END
+END
+
+# ============================================================================
+# SAVE STATE SUPPORT
+# ============================================================================
+
+STRUCT InputState
+    controller_1_buttons: u8
+    controller_1_shift: u8
+    controller_1_count: u8
+    
+    controller_2_buttons: u8
+    controller_2_shift: u8
+    controller_2_count: u8
+    
+    strobe_latch: bool
+    last_write: u8
+    
+    port_1_device: u8
+    port_2_device: u8
+    expansion_device: u8
+END
+
+FUNCTION input_save_state(input: PTR[InputSystem]) -> InputState
+    VAR state: InputState
+    
+    state.controller_1_buttons = input.controller_1.buttons
+    state.controller_1_shift = input.controller_1.shift_register
+    state.controller_1_count = input.controller_1.shift_count
+    
+    state.controller_2_buttons = input.controller_2.buttons
+    state.controller_2_shift = input.controller_2.shift_register
+    state.controller_2_count = input.controller_2.shift_count
+    
+    state.strobe_latch = input.strobe_latch
+    state.last_write = input.last_write
+    
+    state.port_1_device = input.port_1_device
+    state.port_2_device = input.port_2_device
+    state.expansion_device = input.expansion_device
+    
+    RETURN state
+END
+
+FUNCTION input_load_state(input: PTR[InputSystem], state: InputState)
+    input.controller_1.buttons = state.controller_1_buttons
+    input.controller_1.shift_register = state.controller_1_shift
+    input.controller_1.shift_count = state.controller_1_count
+    
+    input.controller_2.buttons = state.controller_2_buttons
+    input.controller_2.shift_register = state.controller_2_shift
+    input.controller_2.shift_count = state.controller_2_count
+    
+    input.strobe_latch = state.strobe_latch
+    input.last_write = state.last_write
+    
+    input.port_1_device = state.port_1_device
+    input.port_2_device = state.port_2_device
+    input.expansion_device = state.expansion_device
+END
+
