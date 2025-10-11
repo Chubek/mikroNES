@@ -153,7 +153,7 @@ ppu_read_byte (uint16_t addr)
       uint16_t palette_addr = addr & MASK_PALETTE;
 
       if (palette_addr >= 0x10 && (palette_addr & 0x03) == 0)
-        palette_addr &= 0x1F;
+        palette_addr &= 0x0F;
 
       return PMEMORY.palette[palette_addr];
     }
@@ -161,3 +161,26 @@ ppu_read_byte (uint16_t addr)
   return 0;
 }
 
+static inline void
+ppu_write_byte (uint16_t addr, uint8_t value)
+{
+  addr &= MASK_PPU_ADDR;
+  value &= MASK_BYTE;
+
+  if (addr < 0x2000)
+    PMEMORY.vram[addr] = value;
+  else if (addr < 0x3F00)
+    {
+      uint16_t mirrored_addr = ppu_nmtbl_get_mirror (addr);
+      PMEMORY.vram[mirrored_addr] = value;
+    }
+  else if (addr < 0x4000)
+    {
+      uint16_t palette_addr = addr & 0x1F;
+
+      if (palette_addr >= 0x10 && (palette_addr & 0x03) == 0)
+        palette_addr &= 0x0F;
+
+      PMEMORY.palette[palette_addr] = value;
+    }
+}
