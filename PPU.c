@@ -137,7 +137,7 @@ ppu_nmtbl_get_mirror (uint16_t addr)
 }
 
 static inline uint8_t
-ppu_vmem_read_byte (uint16_t addr)
+ppu_read_byte (uint16_t addr)
 {
   addr &= MASK_PPU_ADDR;
 
