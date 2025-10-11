@@ -6,6 +6,7 @@
 
 #define MASK_BYTE 0xFF
 #define MASK_WORD 0xFFFF
+#define MASK_PALETTE 0x1F
 #define MASK_PPU_ADDR 0x3FFF
 #define MASK_NMTBL_BASE 0x0FFF
 #define MASK_NMTBL_MIRROR 0x03FF
@@ -116,7 +117,7 @@ ppu_nmtbl_get_idx (uint16_t addr)
   return (addr & MASK_NMTBL_BASE) >> 10;
 }
 
-staitc inline uint16_t
+static inline uint16_t
 ppu_nmtbl_get_mirror (uint16_t addr)
 {
   uint16_t base = addr & MASK_NMTBL_BASE;
@@ -134,3 +135,29 @@ ppu_nmtbl_get_mirror (uint16_t addr)
       return addr;
     }
 }
+
+static inline uint8_t
+ppu_vmem_read_byte (uint16_t addr)
+{
+  addr &= MASK_PPU_ADDR;
+
+  if (addr < 0x2000)
+    return PMEMORY.vram[addr];
+  else if (addr < 0x3F00)
+    {
+      uint16_t mirrored_addr = ppu_nmtbl_get_mirror (addr);
+      return PMEMORY.vram[mirrored_addr];
+    }
+  else if (addr < 0x4000)
+    {
+      uint16_t palette_addr = addr & MASK_PALETTE;
+
+      if (palette_addr >= 0x10 && (palette_addr & 0x03) == 0)
+        palette_addr &= 0x1F;
+
+      return PMEMORY.palette[palette_addr];
+    }
+
+  return 0;
+}
+
