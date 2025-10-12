@@ -393,12 +393,12 @@ cpu_flag_set_if (flag_t flag, bool cond)
 static inline void
 cpu_flag_toggle_zn (uint8_t value)
 {
-  if (value & MASK_BYTE == 0)
+  if ((value & MASK_BYTE) == 0)
     cpu_flag_set ('Z');
   else
     cpu_flag_unset ('Z');
 
-  if (value & MASK_COMPLEMENT != 0)
+  if ((value & MASK_COMPLEMENT) != 0)
     cpu_flag_set ('N');
   else
     cpu_flag_unset ('N');
@@ -868,3 +868,5 @@ cpu_dispatch_table (uint8_t opcode)
 	   return;
     }
 }
+
+#include "6502-itc.h"
