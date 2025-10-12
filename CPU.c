@@ -85,16 +85,21 @@ static struct
   bool pending_IRQ;
 } CPU;
 
-static struct
+static union
 {
-  uint8_t N : 1;
-  uint8_t V : 1;
-  uint8_t X : 1;
-  uint8_t B : 1;
-  uint8_t D : 1;
-  uint8_t I : 1;
-  uint8_t Z : 1;
-  uint8_t C : 1;
+  uint8_t value;
+
+  struct
+  {
+    uint8_t C : 1;
+    uint8_t Z : 1;
+    uint8_t I : 1;
+    uint8_t D : 1;
+    uint8_t B : 1;
+    uint8_t X : 1;
+    uint8_t V : 1;
+    uint8_t N : 1;
+  };
 } FLAGS;
 
 static struct
